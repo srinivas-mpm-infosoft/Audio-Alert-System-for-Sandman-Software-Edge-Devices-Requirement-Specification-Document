@@ -29,6 +29,7 @@ const IO_SUB_ITEMS = [
   { id: "io-general",    icon: Settings2, label: "General"    },
   { id: "io-modbus-rtu", icon: Cpu,       label: "Modbus RTU" },
   { id: "io-modbus-tcp", icon: Network,   label: "Modbus TCP" },
+  { id: "io-mqtt",       icon: Wifi,      label: "MQTT"       },
 ];
 
 const IO_PANEL_IDS = new Set(IO_SUB_ITEMS.map((i) => i.id));

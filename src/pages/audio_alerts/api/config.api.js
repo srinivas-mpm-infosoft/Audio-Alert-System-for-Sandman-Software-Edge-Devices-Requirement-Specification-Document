@@ -5,6 +5,16 @@ export async function getAppSettings() {
   return res.json();
 }
 
+export async function getLanguages() {
+  const res = await fetch(`${targetUrl}/audio-alerts/config/languages`, { credentials: "include" });
+  return res.json();
+}
+
+export async function getZoneTypes() {
+  const res = await fetch(`${targetUrl}/audio-alerts/config/zone-types`, { credentials: "include" });
+  return res.json();
+}
+
 export async function saveAppSettings(data) {
   const res = await fetch(`${targetUrl}/audio-alerts/config/app-settings`, {
     method: "PUT", credentials: "include",

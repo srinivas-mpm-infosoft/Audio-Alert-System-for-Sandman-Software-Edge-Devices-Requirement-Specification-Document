@@ -18,6 +18,7 @@ const IO_SUB_TAB_MAP = {
   "io-general":    "general",
   "io-modbus-rtu": "modbus-rtu",
   "io-modbus-tcp": "modbus-tcp",
+  "io-mqtt":       "mqtt",
   "io-settings":   "general",   // legacy alias
 };
 

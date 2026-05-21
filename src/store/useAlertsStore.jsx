@@ -1,5 +1,9 @@
 import { create } from "zustand";
 
+function alertKey(a) {
+  return a.alert_id ?? a.id;
+}
+
 export const useAlertsStore = create((set, get) => ({
   alerts: [],
   activeCount: 0,
@@ -13,16 +17,28 @@ export const useAlertsStore = create((set, get) => ({
   lastSync: null,
   nowPlaying: null,
 
-  setAlerts: (alerts) => {
-    const active = alerts.filter((a) => a.status === "Active");
+  setAlerts: (alertsOrObj) => {
+    // Accept either a plain array or the {alerts, stats, engine} shape from /audio-alerts/active
+    let alerts, stats;
+    if (Array.isArray(alertsOrObj)) {
+      alerts = alertsOrObj;
+      stats  = null;
+    } else {
+      alerts = alertsOrObj.alerts ?? [];
+      stats  = alertsOrObj.stats ?? null;
+    }
+
+    const active   = alerts.filter((a) => a.status === "Active");
     const critical = active.filter((a) => a.priority === "CRITICAL");
-    const unacked = active.filter((a) => a.ack_required && !a.ack_time);
-    const playing = active.find((a) => a.playback_status === "playing") ?? null;
+    // ack_time (mock) or ack_at (DB) — either indicates it has been acknowledged
+    const unacked  = active.filter((a) => a.ack_required && !a.ack_time && !a.ack_at);
+    const playing  = active.find((a) => a.playback_status === "playing") ?? null;
+
     set({
       alerts,
-      activeCount: active.length,
-      criticalCount: critical.length,
-      unackedCount: unacked.length,
+      activeCount:   stats?.active   ?? active.length,
+      criticalCount: stats?.critical ?? critical.length,
+      unackedCount:  stats?.unacked  ?? unacked.length,
       nowPlaying: playing,
     });
   },
@@ -35,21 +51,21 @@ export const useAlertsStore = create((set, get) => ({
 
   ackAlert: (alert_id) => {
     const updated = get().alerts.map((a) =>
-      a.alert_id === alert_id
-        ? { ...a, status: "Acknowledged", ack_time: new Date().toISOString() }
+      alertKey(a) === alert_id
+        ? { ...a, status: "Acknowledged", ack_time: new Date().toISOString(), ack_at: new Date().toISOString() }
         : a
     );
     get().setAlerts(updated);
   },
 
-  setSystemStatus: ({ speakers_up, speakers_total, gateways_up, gateways_total, engine_status, last_sync }) => {
+  setSystemStatus: ({ speakers_up, speakers_total, gateways_up, gateways_total, engine_status, last_sync } = {}) => {
     set({
-      speakersUp: speakers_up ?? 0,
+      speakersUp:    speakers_up    ?? 0,
       speakersTotal: speakers_total ?? 0,
-      gatewaysUp: gateways_up ?? 0,
+      gatewaysUp:    gateways_up    ?? 0,
       gatewaysTotal: gateways_total ?? 0,
-      engineStatus: engine_status ?? "unknown",
-      lastSync: last_sync ?? null,
+      engineStatus:  engine_status  ?? "unknown",
+      lastSync:      last_sync      ?? null,
     });
   },
 }));

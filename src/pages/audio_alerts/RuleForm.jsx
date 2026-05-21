@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { ArrowLeft, Plus, Save, Loader2, ChevronDown, ChevronUp, HelpCircle } from "lucide-react";
+import { ArrowLeft, Plus, Save, Loader2, ChevronDown, ChevronUp, HelpCircle, X, Mail } from "lucide-react";
 import PriorityBadge from "./components/PriorityBadge";
 import ZonePicker from "./components/ZonePicker";
 import LanguagePicker from "./components/LanguagePicker";
@@ -7,10 +7,13 @@ import ConditionRow from "./components/ConditionRow";
 import EscalationEditor from "./components/EscalationEditor";
 import { PRIORITIES } from "./utils/constants";
 import { getClips, getTemplates } from "./api/audio.api";
+import { targetUrl } from "../../config";
 
 const INPUT = "w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 focus:border-zinc-400 text-slate-700";
 const LABEL = "text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block";
 const SECTION = "bg-white rounded-xl border border-slate-200 shadow-sm p-5 flex flex-col gap-4";
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const BLANK_RULE = {
   name: "",
@@ -31,22 +34,41 @@ const BLANK_RULE = {
   audio_type: "voice",
   use_default_escalation: true,
   escalation_steps: [],
+  notify_emails: [],
   status: "Draft",
 };
 
 export default function RuleForm({ initialRule, onSave, onCancel }) {
-  const [rule, setRule] = useState(() => ({ ...BLANK_RULE, ...initialRule }));
+  const [rule, setRule] = useState(() => ({ ...BLANK_RULE, ...initialRule, notify_emails: initialRule?.notify_emails ?? [] }));
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState({});
   const [showExample, setShowExample] = useState(false);
   const [clips, setClips] = useState([]);
   const [templates, setTemplates] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [emailDraft, setEmailDraft] = useState("");
   const isEditing = !!initialRule?.id;
 
   useEffect(() => {
     getClips().then((r) => { if (r.ok) setClips(r.data); });
     getTemplates().then((r) => { if (r.ok) setTemplates(r.data); });
+    fetch(`${targetUrl}/audio-alerts/users`, { credentials: "include" })
+      .then((r) => r.json()).then((d) => { if (d.ok) setUsers(d.data); });
   }, []);
+
+  // Users assigned to the rule's selected zones (zone_scope empty = all zones)
+  const zoneUsers = users.filter((u) =>
+    !u.zone_scope?.length || u.zone_scope.some((zid) => rule.zone_ids.includes(zid))
+  );
+
+  const addEmail = () => {
+    const email = emailDraft.trim().toLowerCase();
+    if (!EMAIL_RE.test(email) || rule.notify_emails.includes(email)) return;
+    set("notify_emails", [...rule.notify_emails, email]);
+    setEmailDraft("");
+  };
+
+  const removeEmail = (email) => set("notify_emails", rule.notify_emails.filter((e) => e !== email));
 
   const set = (key, val) => setRule((r) => ({ ...r, [key]: val }));
 
@@ -316,8 +338,54 @@ export default function RuleForm({ initialRule, onSave, onCancel }) {
           <span className="text-sm text-slate-700">Use system defaults for this priority</span>
         </label>
         {!rule.use_default_escalation && (
-          <EscalationEditor steps={rule.escalation_steps} onChange={(steps) => set("escalation_steps", steps)} />
+          <EscalationEditor
+            steps={rule.escalation_steps}
+            onChange={(steps) => set("escalation_steps", steps)}
+            zoneUsers={zoneUsers}
+          />
         )}
+      </div>
+
+      {/* 7. Notifications */}
+      <div className={SECTION}>
+        <h3 className="font-semibold text-slate-800 border-b border-slate-100 pb-3">7. Notifications</h3>
+        <div>
+          <label className={LABEL}>Email Recipients</label>
+          <p className="text-xs text-slate-400 mb-2">Add email addresses to be notified when this alert triggers.</p>
+          <div className="flex gap-2">
+            <div className="flex-1 relative">
+              <Mail size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+              <input
+                type="email"
+                className="w-full border border-slate-200 rounded-lg pl-8 pr-3 py-2 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 focus:border-zinc-400 text-slate-700"
+                value={emailDraft}
+                onChange={(e) => setEmailDraft(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addEmail(); } }}
+                placeholder="operator@company.com"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={addEmail}
+              disabled={!EMAIL_RE.test(emailDraft.trim())}
+              className="inline-flex items-center gap-1.5 px-3 py-2 border border-slate-200 rounded-lg text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-40 transition-colors"
+            >
+              <Plus size={13} /> Add
+            </button>
+          </div>
+          {rule.notify_emails.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 mt-2">
+              {rule.notify_emails.map((email) => (
+                <span key={email} className="inline-flex items-center gap-1 px-2.5 py-1 bg-indigo-50 border border-indigo-200 text-indigo-700 rounded-full text-xs font-medium">
+                  {email}
+                  <button type="button" onClick={() => removeEmail(email)} className="text-indigo-400 hover:text-indigo-700 ml-0.5" aria-label={`Remove ${email}`}>
+                    <X size={11} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Example helper */}

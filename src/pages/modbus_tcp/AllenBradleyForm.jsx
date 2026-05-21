@@ -145,10 +145,10 @@ export default function AllenBradleyForm({ plc, plcType, onChange, role, isReadO
         </div>
 
         <div className="overflow-x-auto rounded-xl border border-slate-200">
-          <table className="w-full text-xs" style={{ minWidth: 680 }}>
+          <table className="w-full text-xs" style={{ minWidth: 780 }}>
             <thead className="bg-slate-50 border-b border-slate-200">
               <tr>
-                {["Tag", "Address", "Type", "Length", "Min", "Max", "Output %", "Read", "Write", ""].map((h) => (
+                {["Tag", "Address", "Type", "Length", "Min", "Max", "Output %", "Read", "Write", "Status", ""].map((h) => (
                   <th key={h} className={th}>{h}</th>
                 ))}
               </tr>
@@ -156,13 +156,14 @@ export default function AllenBradleyForm({ plc, plcType, onChange, role, isReadO
             <tbody className="divide-y divide-slate-100 bg-white">
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={10} className="text-center py-8 text-slate-400 italic text-xs">
+                  <td colSpan={11} className="text-center py-8 text-slate-400 italic text-xs">
                     No tags configured. Click &quot;+ Add Tag&quot; to start.
                   </td>
                 </tr>
               )}
               {rows.map((r, i) => {
                 const hideRange = r.datatype === "STRING" || r.datatype === "BOOL";
+                const showWriteFields = !!r.write && (r.status ?? "Unassigned") === "Unassigned";
                 return (
                   <tr key={i} className="hover:bg-slate-50/60 transition-colors">
                     <td className={td}>
@@ -204,26 +205,28 @@ export default function AllenBradleyForm({ plc, plcType, onChange, role, isReadO
                       />
                     </td>
                     <td className={td}>
-                      {hideRange
+                      {hideRange || !showWriteFields
                         ? <span className="text-slate-300 text-xs px-2">—</span>
                         : <input type="number" value={r.min ?? ""} disabled={isReadOnly} onChange={(e) => updRow(i, "min", e.target.value)} className={`${inp} w-16`} />}
                     </td>
                     <td className={td}>
-                      {hideRange
+                      {hideRange || !showWriteFields
                         ? <span className="text-slate-300 text-xs px-2">—</span>
                         : <input type="number" value={r.max ?? ""} disabled={isReadOnly} onChange={(e) => updRow(i, "max", e.target.value)} className={`${inp} w-16`} />}
                     </td>
                     <td className={td}>
-                      <input
-                        type="number"
-                        min="0"
-                        max="100"
-                        value={r.value ?? ""}
-                        placeholder="0–100"
-                        disabled={isReadOnly}
-                        onChange={(e) => updRow(i, "value", e.target.value)}
-                        className={`${inp} w-16`}
-                      />
+                      {!showWriteFields
+                        ? <span className="text-slate-300 text-xs px-2">—</span>
+                        : <input
+                            type="number"
+                            min="0"
+                            max="100"
+                            value={r.value ?? ""}
+                            placeholder="0–100"
+                            disabled={isReadOnly}
+                            onChange={(e) => updRow(i, "value", e.target.value)}
+                            className={`${inp} w-16`}
+                          />}
                     </td>
                     <td className={`${td} text-center`}>
                       <input
@@ -242,6 +245,21 @@ export default function AllenBradleyForm({ plc, plcType, onChange, role, isReadO
                         onChange={(e) => updRow(i, "write", e.target.checked)}
                         className="h-3.5 w-3.5 rounded border-slate-300 accent-zinc-700"
                       />
+                    </td>
+                    <td className={td}>
+                      {!!r.write
+                        ? (
+                          <select
+                            value={r.status ?? "Unassigned"}
+                            disabled={isReadOnly}
+                            onChange={(e) => updRow(i, "status", e.target.value)}
+                            className={`${inp} w-28`}
+                          >
+                            <option>Unassigned</option>
+                            <option>Assigned</option>
+                          </select>
+                        )
+                        : <span className="text-slate-300 text-xs px-2">—</span>}
                     </td>
                     <td className={td}>
                       <button

@@ -400,14 +400,14 @@ export default function UserManagement({ user }) {
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="bg-slate-50 border-b border-slate-100">
-                        {["Username", "Role", "Plant Scope", "Shift", "Last Login", "Status", "Actions"].map((h) => (
+                        {["Username", "Role", "Plant Scope", "Line", "Zone", "Shift", "Last Login", "Status", "Actions"].map((h) => (
                           <th key={h} className="px-4 py-3 text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
                         ))}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-50">
                       {users.length === 0 && (
-                        <tr><td colSpan={7} className="px-4 py-8 text-center text-slate-400 text-sm">No users found</td></tr>
+                        <tr><td colSpan={9} className="px-4 py-8 text-center text-slate-400 text-sm">No users found</td></tr>
                       )}
                       {users.map((u) => (
                         <tr key={u.id} className="hover:bg-slate-50/50">
@@ -415,6 +415,22 @@ export default function UserManagement({ user }) {
                           <td className="px-4 py-3"><RoleBadge role={u.role} /></td>
                           <td className="px-4 py-3 text-xs text-slate-500">
                             {(u.plant_scope ?? []).length ? u.plant_scope.join(", ") : "All"}
+                          </td>
+                          <td className="px-4 py-3 text-xs text-slate-500">
+                            {(() => {
+                              const ids = u.line_scope ?? [];
+                              if (!ids.length) return "All";
+                              const names = ids.map((id) => zones.lines.find((l) => l.id === id)?.name ?? id);
+                              return names.length > 3 ? `${names.slice(0, 3).join(", ")} …+${names.length - 3} more` : names.join(", ");
+                            })()}
+                          </td>
+                          <td className="px-4 py-3 text-xs text-slate-500">
+                            {(() => {
+                              const ids = u.zone_scope ?? [];
+                              if (!ids.length) return "All";
+                              const names = ids.map((id) => zones.zones.find((z) => z.id === id)?.name ?? id);
+                              return names.length > 3 ? `${names.slice(0, 3).join(", ")} …+${names.length - 3} more` : names.join(", ");
+                            })()}
                           </td>
                           <td className="px-4 py-3 text-xs text-slate-500">
                             {(u.shift_scope ?? []).length ? u.shift_scope.join(", ") : "All"}

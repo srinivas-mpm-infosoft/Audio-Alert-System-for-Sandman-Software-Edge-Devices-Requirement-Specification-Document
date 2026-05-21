@@ -23,7 +23,7 @@ export default function App() {
   const setUser = useAuthStore((state) => state.setUser);
   const setRolePermissions = useAuthStore((state) => state.setRolePermissions);
   const user = useAuthStore((state) => state.user);
-  const setAppConfig = useAppConfigStore((s) => s.setAppConfig);
+  const fetchConfigFromBackend = useAppConfigStore((s) => s.fetchConfigFromBackend);
 
   useEffect(() => {
     async function verifySession() {
@@ -45,14 +45,8 @@ export default function App() {
           } catch (_) {
             setRolePermissions(STATIC_RP_AS_ARRAYS);
           }
-          // load app settings (languages, zone_types, parameters)
-          try {
-            const ac = await fetch(`${targetUrl}/audio-alerts/config/app-settings`, { credentials: "include" });
-            if (ac.ok) {
-              const acData = await ac.json();
-              if (acData.data) setAppConfig(acData.data);
-            }
-          } catch (_) { /* non-critical, falls back to static constants */ }
+          // load languages & zone-types from backend
+          await fetchConfigFromBackend();
         } else {
           setUser(null);
           setIsAuthenticated(false);

@@ -25,7 +25,18 @@ export async function uploadClip(clipData, file) {
   return res.json();
 }
 
-export async function updateClip(id, updates) {
+export async function updateClip(id, updates, file) {
+  if (file) {
+    const fd = new FormData();
+    fd.append("file", file);
+    Object.entries(updates).forEach(([k, v]) => {
+      if (v !== null && v !== undefined) fd.append(k, v);
+    });
+    const res = await fetch(`${targetUrl}/audio-alerts/audio/clips/${id}`, {
+      method: "PUT", credentials: "include", body: fd,
+    });
+    return res.json();
+  }
   const res = await fetch(`${targetUrl}/audio-alerts/audio/clips/${id}`, {
     method: "PUT", credentials: "include",
     headers: { "Content-Type": "application/json" },

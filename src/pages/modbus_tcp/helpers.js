@@ -27,9 +27,11 @@ export function normalizeSiemensRow(r) {
     size: r.size ?? "",
     min: r.min ?? "",
     max: r.max ?? "",
+    output_pct: r.output_pct ?? "",
     value: r.value ?? "",
     read: r.read !== false,
     write: r.write ?? false,
+    status: r.status ?? "Unassigned",
   };
 }
 
@@ -45,9 +47,11 @@ export function normalizeAllenBradleyRow(r) {
     length: r.length ?? 1,
     min: r.min ?? "",
     max: r.max ?? "",
+    output_pct: r.output_pct ?? "",
     value: r.value ?? "",
     read: r.read !== false,
     write: r.write ?? false,
+    status: r.status ?? "Unassigned",
   };
 }
 

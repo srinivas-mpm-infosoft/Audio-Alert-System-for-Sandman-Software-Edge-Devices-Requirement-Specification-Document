@@ -22,20 +22,22 @@ export default function AudioConfig() {
   const [clips, setClips] = useState([]);
   const [templates, setTemplates] = useState([]);
   const [zones, setZones] = useState([]);
-  const [zonesDirty, setZonesDirty] = useState({}); // zone_id → modified zone obj
+  const [zonesDirty, setZonesDirty] = useState({});
   const [loading, setLoading] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleteType, setDeleteType] = useState(null);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [editingClip, setEditingClip] = useState(null);
+  const [editSelectedFile, setEditSelectedFile] = useState(null);
   const [newClip, setNewClip] = useState({ name: "", alert_code: "", language: "EN", description: "" });
   const [selectedFile, setSelectedFile] = useState(null);
-  const [newTpl, setNewTpl] = useState({ name: "", language: "EN", voice: "female", tone: "calm", body: "" });
+  const [newTpl, setNewTpl] = useState({ name: "", alert_code: "", language: "EN", voice: "female", tone: "calm", body: "" });
   const [tplFormOpen, setTplFormOpen] = useState(false);
-  const [editingTpl, setEditingTpl] = useState(null); // template being edited
+  const [editingTpl, setEditingTpl] = useState(null);
   const [audioSaving, setAudioSaving] = useState(false);
   const [zoneSaving, setZoneSaving] = useState(false);
   const fileRef = useRef(null);
+  const editFileRef = useRef(null);
 
   const LANGUAGES = useAppConfigStore((s) => s.languages);
   const canUpload = useCan("aa.audio.upload");
@@ -56,6 +58,17 @@ export default function AudioConfig() {
     });
   }, []);
 
+  // ── duplicate helpers ──────────────────────────────────────
+
+  const clipNameExists = (name, excludeId = null) =>
+    clips.some((c) => c.name.trim().toLowerCase() === name.trim().toLowerCase() && c.id !== excludeId);
+  const clipCodeExists = (code, excludeId = null) =>
+    code && clips.some((c) => c.alert_code?.toLowerCase() === code.toLowerCase() && c.id !== excludeId);
+  const tplNameExists = (name, excludeId = null) =>
+    templates.some((t) => t.name.trim().toLowerCase() === name.trim().toLowerCase() && t.id !== excludeId);
+  const tplCodeExists = (code, excludeId = null) =>
+    code && templates.some((t) => t.alert_code?.toLowerCase() === code.toLowerCase() && t.id !== excludeId);
+
   // ── Clips ──────────────────────────────────────────────────
 
   const handleDeleteClip = async () => {
@@ -67,20 +80,33 @@ export default function AudioConfig() {
 
   const handleUpdateClip = async () => {
     if (!editingClip) return;
+    if (clipNameExists(editingClip.name, editingClip.id)) {
+      showToast(`A clip named "${editingClip.name}" already exists`, "error"); return;
+    }
+    if (clipCodeExists(editingClip.alert_code, editingClip.id)) {
+      showToast(`Alert code "${editingClip.alert_code}" is already used by another clip`, "error"); return;
+    }
     const res = await updateClip(editingClip.id, {
       name: editingClip.name,
       alert_code: editingClip.alert_code,
       language: editingClip.language,
       description: editingClip.description,
-    });
+    }, editSelectedFile);
     if (res.ok) {
       setClips((c) => c.map((x) => x.id === editingClip.id ? res.data : x));
       showToast("Clip updated", "success");
       setEditingClip(null);
-    } else showToast("Update failed", "error");
+      setEditSelectedFile(null);
+    } else showToast(res.error || "Update failed", "error");
   };
 
   const handleUploadClip = async () => {
+    if (clipNameExists(newClip.name)) {
+      showToast(`A clip named "${newClip.name}" already exists`, "error"); return;
+    }
+    if (clipCodeExists(newClip.alert_code)) {
+      showToast(`Alert code "${newClip.alert_code}" is already used by another clip`, "error"); return;
+    }
     const res = await uploadClip(newClip, selectedFile, user?.username);
     if (res.ok) {
       setClips((c) => [res.data, ...c]);
@@ -88,7 +114,7 @@ export default function AudioConfig() {
       setUploadOpen(false);
       setNewClip({ name: "", alert_code: "", language: "EN", description: "" });
       setSelectedFile(null);
-    } else showToast("Upload failed", "error");
+    } else showToast(res.error || "Upload failed", "error");
   };
 
   // ── TTS Templates ──────────────────────────────────────────
@@ -101,23 +127,35 @@ export default function AudioConfig() {
   };
 
   const handleCreateTemplate = async () => {
+    if (tplNameExists(newTpl.name)) {
+      showToast(`A template named "${newTpl.name}" already exists`, "error"); return;
+    }
+    if (tplCodeExists(newTpl.alert_code)) {
+      showToast(`Alert code "${newTpl.alert_code}" is already used by another template`, "error"); return;
+    }
     const res = await createTemplate(newTpl, user?.username);
     if (res.ok) {
       setTemplates((t) => [res.data, ...t]);
       showToast("Template created", "success");
       setTplFormOpen(false);
-      setNewTpl({ name: "", language: "EN", voice: "female", tone: "calm", body: "" });
-    } else showToast("Failed to create template", "error");
+      setNewTpl({ name: "", alert_code: "", language: "EN", voice: "female", tone: "calm", body: "" });
+    } else showToast(res.error || "Failed to create template", "error");
   };
 
   const handleSaveTemplate = async () => {
     if (!editingTpl) return;
+    if (tplNameExists(editingTpl.name, editingTpl.id)) {
+      showToast(`A template named "${editingTpl.name}" already exists`, "error"); return;
+    }
+    if (tplCodeExists(editingTpl.alert_code, editingTpl.id)) {
+      showToast(`Alert code "${editingTpl.alert_code}" is already used by another template`, "error"); return;
+    }
     const res = await updateTemplate(editingTpl.id, editingTpl, user?.username);
     if (res.ok) {
       setTemplates((ts) => ts.map((t) => t.id === editingTpl.id ? res.data : t));
       showToast("Template updated", "success");
       setEditingTpl(null);
-    } else showToast("Update failed", "error");
+    } else showToast(res.error || "Update failed", "error");
   };
 
   // ── Zone Languages ─────────────────────────────────────────
@@ -142,7 +180,7 @@ export default function AudioConfig() {
     else showToast(`${failed} zone(s) failed to save`, "error");
   };
 
-  // ── Audio Settings (volume / types) ───────────────────────
+  // ── Audio Settings ────────────────────────────────────────
 
   const handleSaveVolume = async () => {
     setAudioSaving(true);
@@ -161,7 +199,6 @@ export default function AudioConfig() {
 
   return (
     <div className="flex flex-col gap-5">
-      {/* Sub-tab bar */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
         <div className="flex border-b border-slate-100 overflow-x-auto" role="tablist">
           {TABS.map((t, i) => (
@@ -192,11 +229,14 @@ export default function AudioConfig() {
                       <div className="flex items-start justify-between">
                         <div className="min-w-0">
                           <p className="font-semibold text-slate-800 text-sm truncate">{clip.name}</p>
-                          <p className="text-xs text-slate-500 font-mono">{clip.alert_code}</p>
+                          {clip.alert_code && <p className="text-xs text-indigo-600 font-mono">{clip.alert_code}</p>}
                         </div>
                         <span className="text-lg shrink-0">{LANGUAGES.find((l) => l.code === clip.language)?.flag ?? "🌐"}</span>
                       </div>
                       <p className="text-xs text-slate-400 line-clamp-2">{clip.description}</p>
+                      {clip.file_path && (
+                        <p className="text-[10px] text-slate-300 font-mono truncate" title={clip.file_path}>{clip.file_path}</p>
+                      )}
                       <div className="flex items-center gap-3 text-[11px] text-slate-400">
                         {clip.duration_sec && <span>{clip.duration_sec}s</span>}
                         {clip.file_size && <span>{formatFileSize(clip.file_size)}</span>}
@@ -206,7 +246,7 @@ export default function AudioConfig() {
                       <div className="flex items-center gap-2 pt-1 border-t border-slate-100">
                         <AudioPreviewButton payload={{ clip_id: clip.id, language: clip.language }} label="Preview" />
                         {canUpload && (
-                          <button type="button" onClick={() => setEditingClip({ ...clip })}
+                          <button type="button" onClick={() => { setEditingClip({ ...clip }); setEditSelectedFile(null); }}
                             className="ml-auto p-1.5 rounded-lg text-slate-400 hover:bg-indigo-50 hover:text-indigo-600 transition-colors">
                             <Pencil size={13} />
                           </button>
@@ -238,7 +278,6 @@ export default function AudioConfig() {
                 </div>
               )}
 
-              {/* Create form — shown above list only when no template is being edited */}
               {tplFormOpen && !editingTpl && (
                 <div className="border border-indigo-200 rounded-xl p-4 bg-indigo-50 flex flex-col gap-3">
                   <h4 className="font-semibold text-slate-800">New TTS Template</h4>
@@ -250,7 +289,6 @@ export default function AudioConfig() {
                 </div>
               )}
 
-              {/* Template list — edit form replaces the card in-place */}
               {templates.map((tpl) => (
                 editingTpl?.id === tpl.id ? (
                   <div key={tpl.id} className="border border-amber-200 rounded-xl p-4 bg-amber-50 flex flex-col gap-3">
@@ -266,7 +304,9 @@ export default function AudioConfig() {
                     <div className="flex items-start justify-between">
                       <div>
                         <p className="font-semibold text-slate-800">{tpl.name}</p>
-                        <div className="flex gap-2 mt-1 text-xs text-slate-500">
+                        <div className="flex gap-2 mt-1 text-xs text-slate-500 flex-wrap">
+                          {tpl.alert_code && <span className="font-mono text-indigo-600 font-semibold">{tpl.alert_code}</span>}
+                          {tpl.alert_code && <span>•</span>}
                           <span>{LANGUAGES.find((l) => l.code === tpl.language)?.flag} {LANGUAGES.find((l) => l.code === tpl.language)?.label}</span>
                           <span>•</span><span className="capitalize">{tpl.voice} voice</span>
                           <span>•</span><span className="capitalize">{tpl.tone} tone</span>
@@ -326,7 +366,7 @@ export default function AudioConfig() {
                               {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.flag} {l.code}</option>)}
                             </select>
                           </td>
-                        ))} 
+                        ))}
                       </tr>
                     ))}
                   </tbody>
@@ -351,7 +391,6 @@ export default function AudioConfig() {
                   <span className="w-12 text-right font-bold text-slate-700">{masterVolume}%</span>
                 </div>
               </div>
-
               <div>
                 <p className={LABEL}>Per-Priority Volume Offset (dB)</p>
                 <div className="space-y-3">
@@ -365,7 +404,6 @@ export default function AudioConfig() {
                   ))}
                 </div>
               </div>
-
               <div>
                 <p className={LABEL}>Audio Type per Priority</p>
                 <div className="space-y-2">
@@ -380,7 +418,6 @@ export default function AudioConfig() {
                   ))}
                 </div>
               </div>
-
               <div className="flex justify-end pt-2 border-t border-slate-100">
                 <button type="button" onClick={handleSaveVolume} disabled={audioSaving}
                   className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50 inline-flex items-center gap-2">
@@ -395,11 +432,11 @@ export default function AudioConfig() {
 
       {/* Upload Clip Modal */}
       {uploadOpen && (
-        <div className="fixed inset-0 z-999 flex items-center justify-center">
+        <div className="fixed inset-0 z-[999] flex items-center justify-center">
           <div className="absolute inset-0 bg-black/40" onClick={() => setUploadOpen(false)} />
           <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-md mx-4 p-6 z-10 flex flex-col gap-4">
             <h3 className="font-bold text-slate-900">Upload Audio Clip</h3>
-            <div><label className={LABEL} htmlFor="clip-name">Name</label><input id="clip-name" className={INPUT} value={newClip.name} onChange={(e) => setNewClip((c) => ({ ...c, name: e.target.value }))} placeholder="Moisture High — EN" /></div>
+            <div><label className={LABEL} htmlFor="clip-name">Name *</label><input id="clip-name" className={INPUT} value={newClip.name} onChange={(e) => setNewClip((c) => ({ ...c, name: e.target.value }))} placeholder="Moisture High — EN" /></div>
             <div><label className={LABEL} htmlFor="clip-code">Alert Code</label><input id="clip-code" className={INPUT} value={newClip.alert_code} onChange={(e) => setNewClip((c) => ({ ...c, alert_code: e.target.value.toUpperCase() }))} placeholder="MOIST_HIGH" /></div>
             <div>
               <label className={LABEL} htmlFor="clip-lang">Language</label>
@@ -408,18 +445,14 @@ export default function AudioConfig() {
               </select>
             </div>
             <div><label className={LABEL} htmlFor="clip-desc">Description</label><textarea id="clip-desc" rows={2} className={INPUT} value={newClip.description} onChange={(e) => setNewClip((c) => ({ ...c, description: e.target.value }))} placeholder="What does this clip say?" /></div>
-            {/* Real file input */}
             <div>
               <label className={LABEL}>Audio File (WAV / MP3)</label>
-              <div
-                onClick={() => fileRef.current?.click()}
+              <div onClick={() => fileRef.current?.click()}
                 className="border-2 border-dashed border-slate-200 rounded-xl p-5 text-center text-slate-400 text-sm cursor-pointer hover:border-indigo-300 transition-colors">
                 <Upload size={20} className="mx-auto mb-2 opacity-50" />
-                {selectedFile ? (
-                  <p className="text-slate-700 font-medium">{selectedFile.name} <span className="text-xs text-slate-400">({formatFileSize(selectedFile.size)})</span></p>
-                ) : (
-                  <p>Click to select WAV / MP3 file</p>
-                )}
+                {selectedFile
+                  ? <p className="text-slate-700 font-medium">{selectedFile.name} <span className="text-xs text-slate-400">({formatFileSize(selectedFile.size)})</span></p>
+                  : <p>Click to select WAV / MP3 file</p>}
               </div>
               <input ref={fileRef} type="file" accept=".wav,.mp3,audio/*" className="hidden"
                 onChange={(e) => setSelectedFile(e.target.files?.[0] || null)} />
@@ -434,21 +467,39 @@ export default function AudioConfig() {
 
       {/* Edit Clip Modal */}
       {editingClip && (
-        <div className="fixed inset-0 z-999 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setEditingClip(null)} />
+        <div className="fixed inset-0 z-[999] flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40" onClick={() => { setEditingClip(null); setEditSelectedFile(null); }} />
           <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-md mx-4 p-6 z-10 flex flex-col gap-4">
-            <h3 className="font-bold text-slate-900">Edit Clip Metadata</h3>
-            <div><label className={LABEL}>Name</label><input className={INPUT} value={editingClip.name} onChange={(e) => setEditingClip((c) => ({ ...c, name: e.target.value }))} /></div>
-            <div><label className={LABEL}>Alert Code</label><input className={INPUT} value={editingClip.alert_code} onChange={(e) => setEditingClip((c) => ({ ...c, alert_code: e.target.value.toUpperCase() }))} /></div>
+            <h3 className="font-bold text-slate-900">Edit Audio Clip</h3>
+            <div><label className={LABEL}>Name *</label><input className={INPUT} value={editingClip.name} onChange={(e) => setEditingClip((c) => ({ ...c, name: e.target.value }))} /></div>
+            <div><label className={LABEL}>Alert Code</label><input className={INPUT} value={editingClip.alert_code ?? ""} onChange={(e) => setEditingClip((c) => ({ ...c, alert_code: e.target.value.toUpperCase() }))} /></div>
             <div>
               <label className={LABEL}>Language</label>
               <select className={INPUT} value={editingClip.language} onChange={(e) => setEditingClip((c) => ({ ...c, language: e.target.value }))}>
                 {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.flag} {l.label}</option>)}
               </select>
             </div>
-            <div><label className={LABEL}>Description</label><textarea rows={2} className={INPUT} value={editingClip.description} onChange={(e) => setEditingClip((c) => ({ ...c, description: e.target.value }))} /></div>
+            <div><label className={LABEL}>Description</label><textarea rows={2} className={INPUT} value={editingClip.description ?? ""} onChange={(e) => setEditingClip((c) => ({ ...c, description: e.target.value }))} /></div>
+            {/* Replace audio file */}
+            <div>
+              <label className={LABEL}>Replace Audio File (optional)</label>
+              {editingClip.file_path && !editSelectedFile && (
+                <p className="text-[11px] text-slate-400 font-mono mb-1 truncate" title={editingClip.file_path}>
+                  Current: {editingClip.file_path.split("/").pop()}
+                </p>
+              )}
+              <div onClick={() => editFileRef.current?.click()}
+                className="border-2 border-dashed border-slate-200 rounded-xl p-4 text-center text-slate-400 text-sm cursor-pointer hover:border-indigo-300 transition-colors">
+                <Upload size={16} className="mx-auto mb-1 opacity-50" />
+                {editSelectedFile
+                  ? <p className="text-slate-700 font-medium text-xs">{editSelectedFile.name} ({formatFileSize(editSelectedFile.size)})</p>
+                  : <p className="text-xs">Click to replace audio file</p>}
+              </div>
+              <input ref={editFileRef} type="file" accept=".wav,.mp3,audio/*" className="hidden"
+                onChange={(e) => setEditSelectedFile(e.target.files?.[0] || null)} />
+            </div>
             <div className="flex gap-2 justify-end">
-              <button type="button" onClick={() => setEditingClip(null)} className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm text-slate-600 hover:bg-slate-50">Cancel</button>
+              <button type="button" onClick={() => { setEditingClip(null); setEditSelectedFile(null); }} className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm text-slate-600 hover:bg-slate-50">Cancel</button>
               <button type="button" onClick={handleUpdateClip} disabled={!editingClip.name} className="px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-sm font-semibold disabled:opacity-50">Save Changes</button>
             </div>
           </div>
@@ -468,42 +519,50 @@ export default function AudioConfig() {
   );
 }
 
-// ── Shared template form fields ────────────────────────────────
+// ── Shared template form ───────────────────────────────────────
 function TplForm({ tpl, setTpl }) {
   const PARAMETERS = useAppConfigStore((s) => s.parameters);
+  const LANGUAGES  = useAppConfigStore((s) => s.languages);
   const textareaRef = useRef(null);
 
   const insertParam = (paramId) => {
     const ta = textareaRef.current;
     if (!ta) return;
     const start = ta.selectionStart;
-    const end = ta.selectionEnd;
+    const end   = ta.selectionEnd;
     const token = `{${paramId}}`;
     const newBody = tpl.body.slice(0, start) + token + tpl.body.slice(end);
     setTpl((t) => ({ ...t, body: newBody }));
-    setTimeout(() => {
-      ta.focus();
-      ta.setSelectionRange(start + token.length, start + token.length);
-    }, 0);
+    setTimeout(() => { ta.focus(); ta.setSelectionRange(start + token.length, start + token.length); }, 0);
   };
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        <div className="md:col-span-3">
-          <label className={LABEL} htmlFor="tpl-name">Template Name</label>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="md:col-span-2">
+          <label className={LABEL} htmlFor="tpl-name">Template Name *</label>
           <input id="tpl-name" className={INPUT} value={tpl.name} onChange={(e) => setTpl((t) => ({ ...t, name: e.target.value }))} placeholder="e.g. Critical Alert Template" />
         </div>
         <div>
+          <label className={LABEL} htmlFor="tpl-alert-code">Alert Code</label>
+          <input id="tpl-alert-code" className={INPUT} value={tpl.alert_code ?? ""} onChange={(e) => setTpl((t) => ({ ...t, alert_code: e.target.value.toUpperCase() }))} placeholder="e.g. MOIST_HIGH" />
+        </div>
+        <div>
+          <label className={LABEL} htmlFor="tpl-lang">Language</label>
+          <select id="tpl-lang" className={INPUT} value={tpl.language ?? "EN"} onChange={(e) => setTpl((t) => ({ ...t, language: e.target.value }))}>
+            {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.flag} {l.label}</option>)}
+          </select>
+        </div>
+        <div>
           <label className={LABEL} htmlFor="tpl-voice">Voice</label>
-          <select id="tpl-voice" className={INPUT} value={tpl.voice} onChange={(e) => setTpl((t) => ({ ...t, voice: e.target.value }))}>
+          <select id="tpl-voice" className={INPUT} value={tpl.voice ?? "female"} onChange={(e) => setTpl((t) => ({ ...t, voice: e.target.value }))}>
             <option value="female">Female</option>
             <option value="male">Male</option>
           </select>
         </div>
         <div>
           <label className={LABEL} htmlFor="tpl-tone">Tone</label>
-          <select id="tpl-tone" className={INPUT} value={tpl.tone} onChange={(e) => setTpl((t) => ({ ...t, tone: e.target.value }))}>
+          <select id="tpl-tone" className={INPUT} value={tpl.tone ?? "calm"} onChange={(e) => setTpl((t) => ({ ...t, tone: e.target.value }))}>
             <option value="calm">Calm</option>
             <option value="urgent">Urgent</option>
             <option value="neutral">Neutral</option>
@@ -515,34 +574,21 @@ function TplForm({ tpl, setTpl }) {
         <label className={LABEL}>Insert Parameter</label>
         <div className="flex flex-wrap gap-1.5 mb-2">
           {PARAMETERS.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              onClick={() => insertParam(p.id)}
-              title={`${p.label}${p.unit ? " (" + p.unit + ")" : ""} — click to insert`}
-              className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-mono bg-indigo-50 text-indigo-600 border border-indigo-200 hover:bg-indigo-100 hover:border-indigo-400 transition-colors cursor-pointer"
-            >
-              {"{" + p.id + "}"}
+            <button key={p.label} type="button" onClick={() => insertParam(p.label)}
+              title={`${p.label}${p.unit ? " (" + p.unit + ")" : ""}`}
+              className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-mono bg-indigo-50 text-indigo-600 border border-indigo-200 hover:bg-indigo-100 transition-colors cursor-pointer">
+              {"{" + p.label + "}"}
             </button>
           ))}
         </div>
-
-        <label className={LABEL} htmlFor="tpl-body">Template Body</label>
-        <textarea
-          ref={textareaRef}
-          id="tpl-body"
-          rows={4}
-          className={INPUT}
-          value={tpl.body}
+        <label className={LABEL} htmlFor="tpl-body">Template Body *</label>
+        <textarea ref={textareaRef} id="tpl-body" rows={4} className={INPUT} value={tpl.body ?? ""}
           onChange={(e) => setTpl((t) => ({ ...t, body: e.target.value }))}
-          placeholder="Attention. {alert_code} in {zone}. Current value: {trigger_value} {unit}."
-        />
+          placeholder="Attention. {alert_code} in {zone}. Current value: {trigger_value} {unit}." />
         {tpl.body && (
           <div className="flex flex-wrap gap-1 mt-1.5">
             {[...new Set([...tpl.body.matchAll(/\{(\w+)\}/g)].map((m) => m[1]))].map((v) => (
-              <span key={v} className="text-[10px] font-mono bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">
-                {"{" + v + "}"}
-              </span>
+              <span key={v} className="text-[10px] font-mono bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">{"{" + v + "}"}</span>
             ))}
           </div>
         )}

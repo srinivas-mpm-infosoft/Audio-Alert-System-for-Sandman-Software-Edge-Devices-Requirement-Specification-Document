@@ -6,6 +6,7 @@ import { useToast } from "../components/ToastContext";
 import DigitalIO from "./DigitalIO";
 import ModbusRTU from "./ModbusRTU";
 import ModbusTCP from "./ModbusTCP";
+import MqttSettings from "./MqttSettings";
 import {targetUrl} from "../config";
 
 
@@ -55,6 +56,7 @@ export default function IOSettings({ role = "admin", isReadOnly, subTab = "gener
           digital: "Digital channels updated!",
           "modbus-rtu": "Modbus RTU settings saved!",
           "modbus-tcp": "Modbus TCP settings saved!",
+          mqtt: "MQTT settings saved!",
         };
         showToast(messages[subTab] ?? "Settings updated!", "success");
       } else {
@@ -207,6 +209,13 @@ export default function IOSettings({ role = "admin", isReadOnly, subTab = "gener
               config={config}
               onSave={saveConfig}
               setConfig={setConfig}
+            />
+          )}
+          {subTab === "mqtt" && (
+            <MqttSettings
+              config={config}
+              onSave={saveConfig}
+              isReadOnly={isReadOnly}
             />
           )}
         </div>

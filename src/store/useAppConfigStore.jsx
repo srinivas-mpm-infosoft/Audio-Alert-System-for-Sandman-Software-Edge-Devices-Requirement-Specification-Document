@@ -35,4 +35,14 @@ export const useAppConfigStore = create((set, get) => ({
       set({ _fetched: true });
     }
   },
+
+  /** Force-refresh languages from backend (bypasses _fetched cache). */
+  refreshLanguages: async () => {
+    try {
+      const res = await getLanguages();
+      if (res.ok && res.data) {
+        set({ languages: res.data });
+      }
+    } catch (_) {}
+  },
 }));

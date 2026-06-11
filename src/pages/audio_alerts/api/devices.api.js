@@ -32,6 +32,20 @@ export async function addDevice(device) {
   return res.json();
 }
 
+export async function updateDevice(id, updates) {
+  const res = await fetch(`${targetUrl}/audio-alerts/devices/${id}`, {
+    method: "PUT", credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  return res.json();
+}
+
+export async function getDeviceStatus(id) {
+  const res = await fetch(`${targetUrl}/audio-alerts/devices/${id}/status`, { credentials: "include" });
+  return res.json();
+}
+
 // ── Plants ─────────────────────────────────────────────────────
 
 export async function getPlants() {
@@ -107,12 +121,17 @@ export async function getZones(filters = {}) {
 }
 
 export async function createZone(zone) {
-  const res = await fetch(`${targetUrl}/audio-alerts/zones`, {
-    method: "POST", credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(zone),
-  });
-  return res.json();
+  try {
+    const res = await fetch(`${targetUrl}/audio-alerts/zones`, {
+      method: "POST", credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(zone),
+    });
+    const json = await res.json();
+    return { ...json, ok: res.ok && json.ok !== false };
+  } catch (e) {
+    return { ok: false, error: "Network error: " + e.message };
+  }
 }
 
 export async function updateZone(id, updates) {

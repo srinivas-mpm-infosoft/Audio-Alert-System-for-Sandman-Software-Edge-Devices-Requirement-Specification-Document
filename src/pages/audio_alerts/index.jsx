@@ -68,7 +68,7 @@ export default function AudioAlerts({ subTab = "live", user }) {
         </div>
 
         {/* Status strip */}
-        <div className="mt-4 flex flex-wrap items-center gap-3 text-sm">
+        {/* <div className="mt-4 flex flex-wrap items-center gap-3 text-sm">
           <div className="flex items-center gap-2">
             <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Engine</span>
             <StatusPill status={engineStatus === "running" ? "running" : "stopped"} />
@@ -101,7 +101,7 @@ export default function AudioAlerts({ subTab = "live", user }) {
               </div>
             </>
           )}
-        </div>
+        </div> */}
       </div>
 
       {/* Page content */}

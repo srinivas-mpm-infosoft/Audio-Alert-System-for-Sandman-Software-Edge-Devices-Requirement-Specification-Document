@@ -17,7 +17,7 @@ export const ALERT_STATUSES = ["Active", "Acknowledged", "Auto-closed"];
 
 export const RULE_STATUSES = ["Active", "Disabled", "Draft", "Test Mode"];
 
-export const DEVICE_TYPES = ["Gateway", "Speaker", "Amplifier"];
+export const DEVICE_TYPES = ["Edge Node"];
 
 export const DEVICE_STATUSES = ["online", "offline", "fault"];
 

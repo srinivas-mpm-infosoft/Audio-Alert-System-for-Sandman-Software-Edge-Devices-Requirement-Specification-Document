@@ -28,7 +28,9 @@ const NAV_ITEMS = [
 const IO_SUB_ITEMS = [
   { id: "io-general",    icon: Settings2, label: "General"    },
   { id: "io-modbus-rtu", icon: Cpu,       label: "Modbus RTU" },
-  { id: "io-modbus-tcp", icon: Network,   label: "Modbus TCP" },
+  { id: "io-plc",        icon: Network,   label: "PLC"        },
+  { id: "io-scada",      icon: Network,   label: "SCADA PC"   },
+  { id: "io-hmi",        icon: Settings2, label: "HMI"        },
   { id: "io-mqtt",       icon: Wifi,      label: "MQTT"       },
 ];
 
@@ -36,12 +38,12 @@ const IO_PANEL_IDS = new Set(IO_SUB_ITEMS.map((i) => i.id));
 
 // aa-access removed — User Management is now a top-level nav item
 const AA_SUB_ITEMS = [
-  { id: "aa-live",      icon: Activity,  label: "Live Monitor",    perm: "aa.live.view" },
-  { id: "aa-rules",     icon: Sliders,   label: "Rule Builder",    perm: "aa.rules.view" },
+  // { id: "aa-live",      icon: Activity,  label: "Live Monitor",    perm: "aa.live.view" },
+  // { id: "aa-rules",     icon: Sliders,   label: "Rule Builder",    perm: "aa.rules.view" },
   { id: "aa-audio",     icon: Volume2,   label: "Audio Config",    perm: "aa.audio.upload" },
   { id: "aa-devices",   icon: Cpu,       label: "Devices & Zones", perm: "aa.devices.view" },
-  { id: "aa-analytics", icon: BarChart3, label: "Analytics",       perm: "aa.analytics.view" },
-  { id: "aa-logs",      icon: FileText,  label: "Logs & Audit",    perm: "aa.logs.view" },
+  // { id: "aa-analytics", icon: BarChart3, label: "Analytics",       perm: "aa.analytics.view" },
+  // { id: "aa-logs",      icon: FileText,  label: "Logs",    perm: "aa.logs.view" },
   { id: "aa-settings",  icon: Settings2, label: "App Settings",    perm: "aa.users.manage" },
 ];
 
@@ -110,7 +112,7 @@ export default function Sidebar({ active, onSelect, role }) {
                 <button
                   onClick={() => setIoOpen((o) => !o)}
                   className="w-full flex items-center justify-between px-3 py-2 rounded-md text-sm transition-colors duration-100"
-                  style={isIOActive ? { background: "#1e3a5f22", color: "#93c5fd", borderLeft: "2px solid #3b82f6" } : { color: "#6b7280" }}
+                  style={isIOActive ? { background: "#1e3a5f22", color: "#4171a8", borderLeft: "2px solid #3b82f6" } : { color: "#6b7280" }}
                   onMouseEnter={(e) => { if (!isIOActive) e.currentTarget.style.color = "#d1d5db"; }}
                   onMouseLeave={(e) => { if (!isIOActive) e.currentTarget.style.color = "#6b7280"; }}
                 >

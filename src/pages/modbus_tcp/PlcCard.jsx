@@ -3,7 +3,10 @@ import { ChevronDown, ChevronRight, X } from "lucide-react";
 import SiemensForm from "./SiemensForm";
 import AllenBradleyForm from "./AllenBradleyForm";
 
-const PLC_TYPES = ["Siemens", "Allen Bradley", "Delta"];
+// const PLC_TYPES = ["Siemens", "Allen Bradley", "Delta"];
+
+
+const PLC_TYPES = ["Siemens"]
 
 export default function PlcCard({ plc, index, role, isReadOnly, onToggle, onTypeChange, onUpdate, onRemove }) {
   const ip = plc.PLC?.cred?.ip || "Not Set";

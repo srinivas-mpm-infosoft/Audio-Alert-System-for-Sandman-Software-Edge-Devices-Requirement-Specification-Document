@@ -17,9 +17,12 @@ function normalizeRole(role) {
 const IO_SUB_TAB_MAP = {
   "io-general":    "general",
   "io-modbus-rtu": "modbus-rtu",
-  "io-modbus-tcp": "modbus-tcp",
+  "io-plc":        "plc",
+  "io-scada":      "scada",
+  "io-hmi":        "hmi",
   "io-mqtt":       "mqtt",
   "io-settings":   "general",   // legacy alias
+  "io-modbus-tcp": "plc",       // legacy alias → PLC tab
 };
 
 // aa-access removed — User Management is the top-level nav item now

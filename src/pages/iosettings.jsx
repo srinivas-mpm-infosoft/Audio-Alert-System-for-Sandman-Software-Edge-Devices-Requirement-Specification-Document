@@ -51,12 +51,15 @@ export default function IOSettings({ role = "admin", isReadOnly, subTab = "gener
       if (res.ok) {
         setConfig(updatedConfig);
         const messages = {
-          general: "Module switches updated successfully!",
-          analog: "Analog calibration saved!",
-          digital: "Digital channels updated!",
+          general:      "Module switches updated successfully!",
+          analog:       "Analog calibration saved!",
+          digital:      "Digital channels updated!",
           "modbus-rtu": "Modbus RTU settings saved!",
-          "modbus-tcp": "Modbus TCP settings saved!",
-          mqtt: "MQTT settings saved!",
+          "modbus-tcp": "PLC settings saved!",
+          plc:          "PLC settings saved!",
+          scada:        "SCADA PC settings saved!",
+          hmi:          "HMI settings saved!",
+          mqtt:         "MQTT settings saved!",
         };
         showToast(messages[subTab] ?? "Settings updated!", "success");
       } else {
@@ -204,11 +207,37 @@ export default function IOSettings({ role = "admin", isReadOnly, subTab = "gener
               isReadOnly={isReadOnly}
             />
           )}
+          {subTab === "plc" && (
+            <ModbusTCP
+              config={config}
+              onSave={saveConfig}
+              setConfig={setConfig}
+              defaultTab="PLC"
+            />
+          )}
+          {subTab === "scada" && (
+            <ModbusTCP
+              config={config}
+              onSave={saveConfig}
+              setConfig={setConfig}
+              defaultTab="SCADA PC"
+            />
+          )}
+          {subTab === "hmi" && (
+            <ModbusTCP
+              config={config}
+              onSave={saveConfig}
+              setConfig={setConfig}
+              defaultTab="HMI"
+            />
+          )}
+          {/* legacy fallback */}
           {subTab === "modbus-tcp" && (
             <ModbusTCP
               config={config}
               onSave={saveConfig}
               setConfig={setConfig}
+              defaultTab="PLC"
             />
           )}
           {subTab === "mqtt" && (

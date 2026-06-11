@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
-import { Plus, Trash2, Loader2, X, Shield, Pencil, Check, AlertCircle } from "lucide-react";
+import { Plus, Trash2, Loader2, X, Shield, Pencil, Check, AlertCircle, Lock, RefreshCw } from "lucide-react";
 import { useAuthStore } from "../../store/useAuthStore";
 import { useToast } from "../../components/ToastContext";
+import { useAppConfigStore } from "../../store/useAppConfigStore";
 
 import { targetUrl } from "../../config";
 
@@ -69,16 +70,24 @@ function SpinBtn({ loading, onClick, label = "Add" }) {
 export default function AppSettings() {
   const user = useAuthStore((s) => s.user);
   const showToast = useToast();
+  const refreshLanguagesInStore = useAppConfigStore((s) => s.refreshLanguages);
 
   // Languages
   const [languages, setLanguages] = useState([]);
   const [langLoading, setLangLoading] = useState(true);
   const [langError, setLangError] = useState(null);
-  const [newLang, setNewLang] = useState({ code: "", label: "", flag: "" });
+  const [newLang, setNewLang] = useState({ code: "", label: "" });
   const [addingLang, setAddingLang] = useState(false);
   const [editLangId, setEditLangId] = useState(null);
   const [editLang, setEditLang] = useState(null);
   const [savingLangId, setSavingLangId] = useState(null);
+
+  // No-translate words
+  const [noTransWords, setNoTransWords] = useState([]);
+  const [noTransLoading, setNoTransLoading] = useState(true);
+  const [noTransError, setNoTransError] = useState(null);
+  const [newWord, setNewWord] = useState("");
+  const [addingWord, setAddingWord] = useState(false);
 
   // Zone types
   const [zoneTypes, setZoneTypes] = useState([]);
@@ -95,7 +104,7 @@ export default function AppSettings() {
   const [paramLoading, setParamLoading] = useState(true);
   const [paramError, setParamError] = useState(null);
 
-  useEffect(() => { fetchLanguages(); fetchZoneTypes(); fetchParameters(); }, []);
+  useEffect(() => { fetchLanguages(); fetchZoneTypes(); fetchParameters(); fetchNoTransWords(); }, []);
 
   // ── fetch functions ──
 
@@ -123,6 +132,14 @@ export default function AppSettings() {
     setParamLoading(false);
   }
 
+  async function fetchNoTransWords() {
+    setNoTransLoading(true); setNoTransError(null);
+    const res = await apiGet(`${BASE}/no-translate`);
+    if (res.ok) setNoTransWords(res.data ?? []);
+    else setNoTransError(res.error || "Failed to load");
+    setNoTransLoading(false);
+  }
+
   // ── access guard ──
 
   const isAdmin = user?.role === "administrator";
@@ -137,18 +154,31 @@ export default function AppSettings() {
 
   // ── Language handlers ──
 
+  async function handleRefreshLangs() {
+    setLangLoading(true); setLangError(null);
+    const res = await apiGet(`${BASE}/languages`);
+    if (res.ok) {
+      setLanguages(res.data ?? []);
+      await refreshLanguagesInStore();
+    } else {
+      setLangError(res.error || "Failed to load languages");
+    }
+    setLangLoading(false);
+  }
+
   async function handleAddLang() {
     const code = newLang.code.trim().toUpperCase();
     if (!code || !newLang.label.trim()) return;
     if (languages.some((l) => l.code === code)) { showToast("Code already exists", "error"); return; }
     setAddingLang(true);
     const res = await apiPost(`${BASE}/languages`, {
-      code, label: newLang.label.trim(), flag: newLang.flag.trim() || "🌐",
+      code, label: newLang.label.trim(),
     });
     if (res.ok) {
       setLanguages((ls) => [...ls, res.data]);
-      setNewLang({ code: "", label: "", flag: "" });
+      setNewLang({ code: "", label: "" });
       showToast("Language added", "success");
+      await refreshLanguagesInStore();
     } else {
       showToast(res.error || "Failed to add", "error");
     }
@@ -159,11 +189,12 @@ export default function AppSettings() {
     if (!editLang || editLangId == null) return;
     setSavingLangId(editLangId);
     const res = await apiPut(`${BASE}/languages/${editLangId}`, {
-      label: editLang.label.trim(), flag: editLang.flag.trim() || "🌐",
+      label: editLang.label.trim(),
     });
     if (res.ok) {
       setLanguages((ls) => ls.map((l) => l.id === editLangId ? res.data : l));
       showToast("Language updated", "success");
+      await refreshLanguagesInStore();
     } else {
       showToast(res.error || "Failed to update", "error");
     }
@@ -175,6 +206,7 @@ export default function AppSettings() {
     if (res.ok) {
       setLanguages((ls) => ls.filter((l) => l.id !== lang.id));
       showToast("Language removed", "success");
+      await refreshLanguagesInStore();
     } else {
       showToast(res.error || "Failed to delete", "error");
     }
@@ -222,6 +254,36 @@ export default function AppSettings() {
     }
   }
 
+  // ── No-translate word handlers ──
+
+  async function handleAddWord() {
+    const word = newWord.trim();
+    if (!word) return;
+    if (noTransWords.some((w) => w.word.toLowerCase() === word.toLowerCase())) {
+      showToast("Word already exists", "error"); return;
+    }
+    setAddingWord(true);
+    const res = await apiPost(`${BASE}/no-translate`, { word });
+    if (res.ok) {
+      setNoTransWords((ws) => [...ws, res.data]);
+      setNewWord("");
+      showToast("Word added", "success");
+    } else {
+      showToast(res.error || "Failed to add", "error");
+    }
+    setAddingWord(false);
+  }
+
+  async function handleDeleteWord(w) {
+    const res = await apiDelete(`${BASE}/no-translate/${w.id}`);
+    if (res.ok) {
+      setNoTransWords((ws) => ws.filter((x) => x.id !== w.id));
+      showToast("Word removed", "success");
+    } else {
+      showToast(res.error || "Failed to delete", "error");
+    }
+  }
+
   // ── render ────────────────────────────────────────────────────────────────
 
   return (
@@ -229,13 +291,20 @@ export default function AppSettings() {
 
       {/* Languages */}
       <div className={SECTION}>
-        <div className="border-b border-slate-100 pb-3 mb-4">
-          <h3 className="font-semibold text-slate-800">Languages</h3>
-          <p className="text-xs text-slate-400 mt-0.5">Spoken languages available for audio clips and TTS templates</p>
+        <div className="border-b border-slate-100 pb-3 mb-4 flex items-center justify-between">
+          <div>
+            <h3 className="font-semibold text-slate-800">Languages</h3>
+            <p className="text-xs text-slate-400 mt-0.5">Spoken languages available for audio clips and TTS templates</p>
+          </div>
+          <button onClick={handleRefreshLangs} disabled={langLoading}
+            className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors"
+            title="Refresh languages">
+            {langLoading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+          </button>
         </div>
 
         {langLoading ? <LoadingRow /> :
-          langError ? <ErrorRow message={langError} onRetry={fetchLanguages} /> : (
+          langError ? <ErrorRow message={langError} onRetry={handleRefreshLangs} /> : (
             <div className="space-y-1.5 mb-4">
               {languages.length === 0 && (
                 <p className="text-slate-400 text-sm">No languages configured yet.</p>
@@ -243,8 +312,6 @@ export default function AppSettings() {
               {languages.map((l) =>
                 editLangId === l.id ? (
                   <div key={l.id} className="flex items-center gap-2 px-3 py-2 bg-indigo-50 rounded-lg border border-indigo-200">
-                    <input className={`${INPUT} w-20 text-xs font-mono`} value={editLang.flag} maxLength={4} placeholder="🇬🇧"
-                      onChange={(e) => setEditLang((x) => ({ ...x, flag: e.target.value }))} />
                     <span className="font-mono text-xs font-bold text-indigo-600 w-10 text-center shrink-0">{l.code}</span>
                     <input className={`${INPUT} flex-1 text-sm`} value={editLang.label} autoFocus
                       onChange={(e) => setEditLang((x) => ({ ...x, label: e.target.value }))}
@@ -260,8 +327,7 @@ export default function AppSettings() {
                   </div>
                 ) : (
                   <div key={l.id} className="flex items-center gap-3 px-3 py-2 bg-slate-50 rounded-lg">
-                    <span className="text-lg w-7 text-center shrink-0">{l.flag}</span>
-                    <span className="font-mono text-xs font-bold text-indigo-600 w-8 shrink-0">{l.code}</span>
+                    <span className="font-mono text-xs font-bold text-indigo-600 w-10 shrink-0">{l.code}</span>
                     <span className="text-sm text-slate-700 flex-1">{l.label}</span>
                     <button onClick={() => { setEditLangId(l.id); setEditLang({ ...l }); }}
                       className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors">
@@ -285,9 +351,6 @@ export default function AppSettings() {
             <input className={`${INPUT} w-36`} value={newLang.label} placeholder="English"
               onChange={(e) => setNewLang((l) => ({ ...l, label: e.target.value }))}
               onKeyDown={(e) => e.key === "Enter" && handleAddLang()} /></div>
-          <div><label className={LABEL}>Flag emoji</label>
-            <input className={`${INPUT} w-24`} value={newLang.flag} placeholder="🇬🇧"
-              onChange={(e) => setNewLang((l) => ({ ...l, flag: e.target.value }))} /></div>
           <SpinBtn loading={addingLang} onClick={handleAddLang} />
         </div>
       </div>
@@ -377,6 +440,71 @@ export default function AppSettings() {
                 </table>
               </div>
             )}
+      </div>
+
+      {/* No Translation Required */}
+      <div className={SECTION}>
+        <div className="border-b border-slate-100 pb-3 mb-4">
+          <h3 className="font-semibold text-slate-800">No Translation Required</h3>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Words that must never be translated — used as-is across all languages in TTS and audio templates.{" "}
+            <span className="text-slate-500">Locked words are pre-registered and cannot be removed.</span>
+          </p>
+        </div>
+
+        {noTransLoading ? <LoadingRow /> :
+          noTransError ? <ErrorRow message={noTransError} onRetry={fetchNoTransWords} /> : (
+            <>
+              {["foundry", "basic", "custom"].map((cat) => {
+                const words = noTransWords.filter((w) => w.category === cat);
+                if (words.length === 0 && cat !== "custom") return null;
+                const catLabel = cat === "foundry" ? "Foundry" : cat === "basic" ? "Basic / Technical" : "Custom";
+                const chipColor = cat === "foundry"
+                  ? { base: "bg-blue-50 text-blue-700 border border-blue-200", lock: "text-blue-400" }
+                  : cat === "basic"
+                  ? { base: "bg-slate-100 text-slate-600 border border-slate-200", lock: "text-slate-400" }
+                  : { base: "bg-violet-50 text-violet-700 border border-violet-200", lock: "text-violet-400" };
+
+                return (
+                  <div key={cat} className="mb-4">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">{catLabel}</p>
+                    {words.length === 0 ? (
+                      <p className="text-slate-400 text-xs italic">No custom words added yet.</p>
+                    ) : (
+                      <div className="flex flex-wrap gap-1.5">
+                        {words.map((w) => (
+                          <span key={w.id}
+                            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium ${chipColor.base}`}>
+                            {w.is_preset
+                              ? <Lock size={9} className={`shrink-0 ${chipColor.lock}`} />
+                              : null}
+                            {w.word}
+                            {!w.is_preset && (
+                              <button onClick={() => handleDeleteWord(w)}
+                                className="ml-0.5 text-slate-400 hover:text-red-500 transition-colors">
+                                <X size={10} />
+                              </button>
+                            )}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              <div className="flex gap-2 mt-2">
+                <input
+                  className={`${INPUT} flex-1 max-w-xs`}
+                  value={newWord}
+                  placeholder="Add a word…"
+                  onChange={(e) => setNewWord(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleAddWord()}
+                />
+                <SpinBtn loading={addingWord} onClick={handleAddWord} />
+              </div>
+            </>
+          )}
       </div>
 
     </div>

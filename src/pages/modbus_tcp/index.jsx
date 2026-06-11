@@ -11,7 +11,7 @@ import {
   normalizeHmiDevice,
 } from "./helpers";
 
-const BRANDS = ["Siemens", "Allen Bradley", "Delta"];
+const BRANDS = ["Siemens"];
 const MAIN_TABS = ["PLC", "SCADA PC", "HMI"];
 
 const mainTabCls = (active) =>
@@ -28,11 +28,11 @@ const deviceTabCls = (active) =>
     ? "bg-zinc-800 text-white border-zinc-800"
     : "bg-white text-slate-500 border-slate-200 hover:border-zinc-400 hover:text-zinc-700");
 
-export default function ModbusTCP({ config, onSave, setConfig, role = "admin", isReadOnly }) {
+export default function ModbusTCP({ config, onSave, setConfig, role = "admin", isReadOnly, defaultTab = "PLC" }) {
   const showToast = useToast();
   const [localCfg, setLocalCfg] = useState(() => ensureBase(config));
   const [isSaving, setIsSaving] = useState(false);
-  const [mainTab, setMainTab] = useState("PLC");
+  const [mainTab, setMainTab] = useState(defaultTab);
   const [activeBrand, setActiveBrand] = useState("Siemens");
   const [activePlcGlobalIdx, setActivePlcGlobalIdx] = useState(null);
   const [activeScadaIdx, setActiveScadaIdx] = useState(null);
@@ -59,7 +59,7 @@ export default function ModbusTCP({ config, onSave, setConfig, role = "admin", i
     try {
       await onSave(localCfg);
       setConfig?.(localCfg);
-      showToast("Modbus TCP settings saved!", "success");
+      showToast("Ethernet TCP/IP settings saved!", "success");
     } catch (err) {
       console.error(err);
       showToast("Save failed", "error");
@@ -243,7 +243,7 @@ export default function ModbusTCP({ config, onSave, setConfig, role = "admin", i
       {/* Page Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-semibold text-slate-700">Modbus TCP</h2>
+          <h2 className="text-xl font-semibold text-slate-700">{mainTab}</h2>
           <p className="text-xs text-slate-400 mt-0.5">Configure device connections and settings</p>
         </div>
         <button
@@ -255,14 +255,7 @@ export default function ModbusTCP({ config, onSave, setConfig, role = "admin", i
         </button>
       </div>
 
-      {/* Main tabs: PLC | SCADA PC | HMI */}
-      <div className="flex gap-1 p-1 bg-slate-100 rounded-xl w-fit">
-        {MAIN_TABS.map((t) => (
-          <button key={t} type="button" onClick={() => handleMainTabChange(t)} className={mainTabCls(mainTab === t)}>
-            {t}
-          </button>
-        ))}
-      </div>
+      {/* Tab switcher hidden — PLC / SCADA PC / HMI are now separate sidebar items */}
 
       {/* ── PLC ── */}
       {mainTab === "PLC" && (

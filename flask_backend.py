@@ -20,6 +20,8 @@ import logging
 import socket
 import subprocess
 import time
+import urllib.request
+import urllib.error
 from datetime import datetime, timedelta
 from pathlib import Path
 from decimal import Decimal
@@ -38,7 +40,7 @@ from sqlalchemy.orm import relationship
 # STATIC PATHS  (only BASE is fixed; everything else is configurable)
 # ============================================================
 
-BASE               = Path("/home/srinivas/ReComputer-r1125-Gateway-UI-All-test/Main Application")
+BASE               = Path("/home/recomputer/SSD-backup/Gateway-Backend/Main Application")
 STATIC             = BASE / "static"
 CONFIG_FILE        = BASE / "config.json"
 SYSTEM_CONFIG_FILE = BASE / "system_config.json"
@@ -88,6 +90,23 @@ LANGUAGES = [
     {"code": "TE", "label": "Telugu",   "flag": "🇮🇳"},
 ]
 ZONE_TYPES = ["Melting", "Moulding", "Mulling", "Cooling", "Sand Prep", "Pouring", "Custom"]
+
+NO_TRANSLATE_PRESETS = {
+    "foundry": [
+        "Bentonite", "Compactability", "GFN", "Permeability", "Mulling",
+        "Moulding", "Pouring", "Melting", "Cooling", "Sprue", "Riser",
+        "Runner", "Cope", "Drag", "Flask", "Pattern", "Mould", "Ladle",
+        "Furnace", "Cupola", "Laitance", "Fettling", "Sand Prep", "Knockout",
+        "Shotblast", "Compactometer", "Thermocouple", "Pyrometer",
+        "Bentonite Index", "Active Clay", "LOI", "Coal Dust",
+    ],
+    "basic": [
+        "OK", "ID", "pH", "PPM", "PLC", "SCADA", "RTU", "TCP", "MQTT",
+        "Modbus", "RPM", "Hz", "kW", "kPa", "MPa", "kN",
+        "CRITICAL", "HIGH", "MEDIUM", "LOW", "ERROR", "WARNING",
+        "ON", "OFF", "NULL", "NaN", "N/A",
+    ],
+}
 
 # Parameter catalogue — units / labels for the channel_key namespace
 PARAMETER_CATALOG = [
@@ -147,7 +166,7 @@ DEFAULT_SYSTEM_CONFIG = {
     "app": {
         "server_host":          "0.0.0.0",
         "server_port":          8000,
-        "log_root":             "/home/srinivas/logs",
+        "log_root":             "/home/recomputer/SSD-backup/logs",
         "session_lifetime_days": 365,
         "cookie_secure":        False,
         "cookie_samesite":      "Lax",
@@ -157,7 +176,7 @@ DEFAULT_SYSTEM_CONFIG = {
         "port":     3306,
         "name":     "gateway",
         "user":     "gateway",
-        "password": "Gateway%402025",
+        "password": "gateway",
     },
     "cors_origins": [
         "http://localhost:5173",
@@ -175,6 +194,11 @@ DEFAULT_SYSTEM_CONFIG = {
         "alert_log_max":              2000,
         "rule_test_default_minutes":  5,
         "reading_freshness_sec":      30,
+    },
+    "shifts": {
+        "Morning":   {"start": "06:00", "end": "14:00"},
+        "Afternoon": {"start": "14:00", "end": "22:00"},
+        "Night":     {"start": "22:00", "end": "06:00"},
     },
 }
 
@@ -435,10 +459,12 @@ class Device(db.Model):
             "zone_id":       zone_obj.zone_code if zone_obj else None,
             "zone_name":     zone_obj.name if zone_obj else None,
             "address":       self.address,
+            "ip":            self.address,
             "slave_id":      self.slave_id,
             "firmware":      self.firmware,
             "status":        self.status,
             "last_seen":     self.last_seen.isoformat() if self.last_seen else None,
+            "last_heartbeat": self.last_seen.isoformat() if self.last_seen else None,
             "uptime_pct":    meta.get("uptime_pct", 100.0),
             "downtime_min":  meta.get("downtime_min", 0),
             "metrics":       meta.get("metrics", {"cpu":0,"memory":0,"latency_ms":0,"audio_queue":0}),
@@ -805,9 +831,58 @@ class AppZoneType(db.Model):
     __tablename__ = "app_zone_types"
     id    = Column(Integer, primary_key=True)
     label = Column(String(64), unique=True, nullable=False)
- 
+
     def to_dict(self):
         return {"id": self.id, "label": self.label}
+
+
+class AppNoTranslateWord(db.Model):
+    __tablename__ = "app_no_translate_words"
+    id        = Column(Integer, primary_key=True)
+    word      = Column(String(128), unique=True, nullable=False)
+    category  = Column(String(32), default="custom")  # foundry / basic / custom
+    is_preset = Column(Boolean, default=False)
+
+    def to_dict(self):
+        return {
+            "id":        self.id,
+            "word":      self.word,
+            "category":  self.category,
+            "is_preset": bool(self.is_preset),
+        }
+
+
+class ZoneLanguageConfig(db.Model):
+    """
+    Stores language assignments for three config types:
+      "plant" : reference_id = plant_id
+      "zone"  : reference_id = zone_code
+      "shift" : reference_id = shift name (Morning / Afternoon / Night)
+    """
+    __tablename__  = "zone_language_configs"
+    __table_args__ = (
+        Index("uq_zlc_type_ref", "config_type", "reference_id", unique=True),
+    )
+    id          = Column(Integer,     primary_key=True)
+    config_type = Column(String(16),  nullable=False)   # plant | zone | shift
+    reference_id= Column(String(64),  nullable=False)
+    language    = Column(String(8),   nullable=False)
+    updated_at  = Column(DateTime,    default=datetime.now, onupdate=datetime.now)
+
+    def to_dict(self):
+        return {
+            "config_type":  self.config_type,
+            "reference_id": self.reference_id,
+            "language":     self.language,
+        }
+
+
+class AppSettingKV(db.Model):
+    """Generic key-value store for app-level settings."""
+    __tablename__ = "app_settings_kv"
+    key   = Column(String(128), primary_key=True)
+    value = Column(Text)
+
 
 # ============================================================
 # REQUEST / RESPONSE LOGGING
@@ -1492,21 +1567,26 @@ def aa_config_audio_put():
 def aa_app_settings_get():
     err = _require_login()
     if err: return err
- 
+
     languages  = [l.to_dict() for l in AppLanguage.query.order_by(AppLanguage.id).all()]
     zone_types = [z.to_dict() for z in AppZoneType.query.order_by(AppZoneType.id).all()]
- 
+
     # Parameters from channels table — distinct channel_name + unit, enabled only
     rows = db.session.execute(text(
         "SELECT DISTINCT channel_name, unit FROM channels WHERE is_enabled = 1 ORDER BY channel_name"
     )).mappings().all()
     parameters = [{"label": r["channel_name"], "unit": r["unit"] or ""} for r in rows]
- 
+
+    no_translate_words = [w.to_dict() for w in AppNoTranslateWord.query.order_by(
+        AppNoTranslateWord.is_preset.desc(), AppNoTranslateWord.category, AppNoTranslateWord.word
+    ).all()]
+
     return jsonify(ok=True, data={
-        "languages":         languages,
-        "zone_types":        [z["label"] for z in zone_types],
-        "zone_type_objects": zone_types,
-        "parameters":        parameters,
+        "languages":           languages,
+        "zone_types":          [z["label"] for z in zone_types],
+        "zone_type_objects":   zone_types,
+        "parameters":          parameters,
+        "no_translate_words":  no_translate_words,
     })
 
 
@@ -1615,8 +1695,211 @@ def aa_zone_types_del(zt_id):
     db.session.commit()
     _add_audit("config.change", f"zone_type/{zt.label}", f"Zone type removed: {zt.label}", before=before)
     return jsonify(ok=True, data={"id": zt_id})
- 
 
+
+# ── No-Translation Words CRUD ──────────────────────────────────────────────────
+
+@app.route("/audio-alerts/config/no-translate", methods=["GET"])
+def aa_no_translate_get():
+    err = _require_login()
+    if err: return err
+    words = AppNoTranslateWord.query.order_by(
+        AppNoTranslateWord.is_preset.desc(), AppNoTranslateWord.category, AppNoTranslateWord.word
+    ).all()
+    return jsonify(ok=True, data=[w.to_dict() for w in words])
+
+
+@app.route("/audio-alerts/config/no-translate", methods=["POST"])
+def aa_no_translate_post():
+    err = _require_login()
+    if err: return err
+    data = request.json or {}
+    word = (data.get("word") or "").strip()
+    if not word:
+        return jsonify(ok=False, error="word required"), 400
+    if AppNoTranslateWord.query.filter_by(word=word).first():
+        return jsonify(ok=False, error="Word already exists"), 409
+    w = AppNoTranslateWord(word=word, category="custom", is_preset=False)
+    db.session.add(w)
+    db.session.commit()
+    _add_audit("config.change", f"no_translate/{word}", f"No-translate word added: {word}")
+    return jsonify(ok=True, data=w.to_dict()), 201
+
+
+@app.route("/audio-alerts/config/no-translate/<int:word_id>", methods=["DELETE"])
+def aa_no_translate_del(word_id):
+    err = _require_login()
+    if err: return err
+    w = AppNoTranslateWord.query.get(word_id)
+    if not w:
+        return jsonify(ok=False, error="Word not found"), 404
+    if w.is_preset:
+        return jsonify(ok=False, error="Pre-registered words cannot be removed"), 400
+    before = w.to_dict()
+    db.session.delete(w)
+    db.session.commit()
+    _add_audit("config.change", f"no_translate/{w.word}", f"No-translate word removed: {w.word}", before=before)
+    return jsonify(ok=True, data={"id": word_id})
+
+
+# ============================================================
+# ZONE LANGUAGE CONFIG  (plant-wise / zone-wise / shift-wise)
+# ============================================================
+
+def _kv_get(key: str, default: str = "") -> str:
+    row = AppSettingKV.query.get(key)
+    return row.value if row else default
+
+
+def _kv_set(key: str, value: str):
+    row = AppSettingKV.query.get(key)
+    if row:
+        row.value = value
+    else:
+        db.session.add(AppSettingKV(key=key, value=value))
+
+
+@app.route("/audio-alerts/zone-language-config", methods=["GET"])
+def aa_zlc_get():
+    err = _require_login()
+    if err: return err
+
+    active_type = _kv_get("zone_language.active_type", "zone")
+
+    rows = ZoneLanguageConfig.query.all()
+    configs: dict = {"plant": {}, "zone": {}, "shift": {}}
+    for r in rows:
+        configs.setdefault(r.config_type, {})[r.reference_id] = r.language
+
+    # Enrich shift config with defaults if empty
+    for shift in ("Morning", "Afternoon", "Night"):
+        configs["shift"].setdefault(shift, "EN")
+
+    # Return all plants and zones so frontend can build the UI
+    plants = [p.to_dict() for p in Plant.query.all()]
+    zones  = [z.to_dict() for z in Zone.query.all()]
+
+    return jsonify(ok=True, data={
+        "active_type": active_type,
+        "configs":     configs,
+        "plants":      plants,
+        "zones":       zones,
+    })
+
+
+@app.route("/audio-alerts/zone-language-config", methods=["PUT"])
+def aa_zlc_put():
+    """
+    Save language config and optionally switch active type.
+
+    Body:
+      active_type  string            "plant" | "zone" | "shift"
+      configs      dict              {"plant": {plant_id: lang}, "zone": {zone_code: lang}, "shift": {shift: lang}}
+      apply        bool (default true) — if true, update Zone.default_language immediately
+    """
+    err = _require_login()
+    if err: return err
+    if not _can("aa.zones.edit"):
+        return jsonify(ok=False, error="Permission denied"), 403
+
+    data        = request.json or {}
+    active_type = data.get("active_type", _kv_get("zone_language.active_type", "zone"))
+    configs     = data.get("configs", {})
+    apply_now   = data.get("apply", True)
+
+    try:
+        # Persist every config entry (upsert)
+        for ctype, mapping in configs.items():
+            if ctype not in ("plant", "zone", "shift"):
+                continue
+            for ref_id, lang in mapping.items():
+                row = ZoneLanguageConfig.query.filter_by(
+                    config_type=ctype, reference_id=ref_id
+                ).first()
+                if row:
+                    row.language   = lang
+                    row.updated_at = datetime.now()
+                else:
+                    db.session.add(ZoneLanguageConfig(
+                        config_type=ctype, reference_id=ref_id, language=lang
+                    ))
+
+        _kv_set("zone_language.active_type", active_type)
+        db.session.commit()
+
+        # Apply to zones immediately if requested
+        if apply_now:
+            _apply_zone_languages(active_type, configs)
+
+        _add_audit("config.change", "zone_language_config",
+                   f"Zone language config saved (type={active_type})",
+                   after={"active_type": active_type})
+
+        return jsonify(ok=True, data={"active_type": active_type})
+    except Exception as e:
+        db.session.rollback()
+        log.error("zone_language_config save failed: %s", e)
+        return jsonify(ok=False, error=str(e)), 500
+
+
+def _apply_zone_languages(active_type: str, configs: dict):
+    """Update Zone.default_language based on the chosen config type."""
+    zones = Zone.query.all()
+
+    if active_type == "plant":
+        plant_langs = configs.get("plant", {})
+        # Fall back to DB
+        for r in ZoneLanguageConfig.query.filter_by(config_type="plant").all():
+            plant_langs.setdefault(r.reference_id, r.language)
+        for z in zones:
+            lang = plant_langs.get(z.plant_id)
+            if lang:
+                z.default_language = lang
+
+    elif active_type == "zone":
+        zone_langs = configs.get("zone", {})
+        for r in ZoneLanguageConfig.query.filter_by(config_type="zone").all():
+            zone_langs.setdefault(r.reference_id, r.language)
+        for z in zones:
+            lang = zone_langs.get(z.zone_code)
+            if lang:
+                z.default_language = lang
+
+    elif active_type == "shift":
+        shift_langs = configs.get("shift", {})
+        for r in ZoneLanguageConfig.query.filter_by(config_type="shift").all():
+            shift_langs.setdefault(r.reference_id, r.language)
+        current_shift = _detect_shift()
+        lang = shift_langs.get(current_shift, "EN")
+        for z in zones:
+            z.default_language = lang
+
+    db.session.commit()
+
+
+# ── Shift Times (stored in system_config.json) ──────────────────────────────
+
+@app.route("/audio-alerts/shift-times", methods=["GET"])
+def aa_shift_times_get():
+    err = _require_login()
+    if err: return err
+    sc = _read_sc()
+    shifts = sc.get("shifts", DEFAULT_SYSTEM_CONFIG["shifts"])
+    return jsonify(ok=True, data=shifts)
+
+
+@app.route("/audio-alerts/shift-times", methods=["PUT"])
+def aa_shift_times_put():
+    err = _require_login()
+    if err: return err
+    if not _can("aa.security.manage"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    data = request.json or {}
+    sc = _read_sc()
+    sc["shifts"] = data
+    _write_sc(sc)
+    _add_audit("config.change", "shift_times", "Shift times updated", after=data)
+    return jsonify(ok=True, data=data)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -2558,6 +2841,41 @@ def aa_device_restart(dev_id):
                                   "ts": datetime.now().isoformat()})
 
 
+@app.route("/audio-alerts/devices/<dev_id>/status", methods=["GET"])
+def aa_device_status(dev_id):
+    """Proxy to http://<device-ip>:5000/status to fetch last heartbeat info."""
+    err = _require_login()
+    if err: return err
+    device = _resolve_device(dev_id)
+    if not device:
+        return jsonify(ok=False, error="Device not found"), 404
+    ip = device.address
+    if not ip:
+        return jsonify(ok=False, error="No IP address configured for this device"), 400
+    try:
+        req = urllib.request.Request(
+            f"http://{ip}:5000/status",
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            raw = resp.read().decode("utf-8")
+            data = json.loads(raw)
+        # Update device last_seen
+        device.last_seen = datetime.now()
+        device.status    = "online"
+        db.session.commit()
+        return jsonify(ok=True, data=data)
+    except urllib.error.URLError as e:
+        reason = str(e.reason) if hasattr(e, "reason") else str(e)
+        device.status = "offline"
+        db.session.commit()
+        return jsonify(ok=False, error=f"Device unreachable: {reason}"), 503
+    except json.JSONDecodeError:
+        return jsonify(ok=False, error="Device returned invalid JSON"), 502
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 503
+
+
 # ============================================================
 # AUDIO ALERTS — Channels (NEW)
 # ============================================================
@@ -3004,6 +3322,114 @@ def aa_logs_audit():
     })
 
 
+@app.route("/audio-alerts/logs/alert-device", methods=["GET"])
+def aa_logs_alert_device():
+    """Read from the external alert_logs table populated by the device alert program."""
+    err = _require_login()
+    if err: return err
+    if not _can("aa.logs.view"):
+        return jsonify(ok=False, error="Permission denied"), 403
+
+    page          = max(1, int(request.args.get("page", 1)))
+    size          = max(1, min(200, int(request.args.get("page_size", 50))))
+    search        = request.args.get("search", "").strip()
+    priority_arg  = request.args.get("priority", "").strip()
+    zone_arg      = request.args.get("zone", "").strip()
+    sort_by_arg   = request.args.get("sort_by", "")
+    sort_dir_arg  = request.args.get("sort_dir", "desc").lower()
+
+    try:
+        # Discover columns from information_schema
+        cols_result = db.session.execute(text(
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'alert_logs' "
+            "ORDER BY ORDINAL_POSITION"
+        )).fetchall()
+
+        if not cols_result:
+            return jsonify(ok=False, error="alert_logs table not found in database"), 404
+
+        cols = [row[0] for row in cols_result]
+
+        # Map semantic roles to actual column names
+        def _pick(candidates):
+            return next((c for c in candidates if c in cols), None)
+
+        name_col     = _pick(["alert_name","name","message","alert_message","alert"])
+        priority_col = _pick(["priority","severity","level","alert_level"])
+        zone_col     = _pick(["zone","zone_name","zone_id","location"])
+        ts_col       = _pick(["timestamp","created_at","triggered_at","alert_time","time","ts"])
+        dest_col     = _pick(["destination_ips","dest_ips","target_ips","device_ips","ip_addresses","destination"])
+        status_col   = _pick(["delivery_status","status","send_status","dispatch_status","delivery_state"])
+
+        # Build WHERE clause
+        conditions = []
+        params     = {}
+
+        if search and name_col:
+            conditions.append(f"`{name_col}` LIKE :search")
+            params["search"] = f"%{search}%"
+        if priority_arg and priority_col:
+            conditions.append(f"`{priority_col}` = :priority")
+            params["priority"] = priority_arg
+        if zone_arg and zone_col:
+            conditions.append(f"`{zone_col}` = :zone")
+            params["zone"] = zone_arg
+
+        where = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+        # Total count
+        total = db.session.execute(
+            text(f"SELECT COUNT(*) FROM alert_logs {where}"), params
+        ).scalar() or 0
+
+        # Validate sort column
+        safe_sort = sort_by_arg if sort_by_arg in cols else (ts_col or cols[0])
+        safe_dir  = "DESC" if sort_dir_arg == "desc" else "ASC"
+
+        # Fetch page
+        qparams = dict(params)
+        qparams["limit"]  = size
+        qparams["offset"] = (page - 1) * size
+        rows = db.session.execute(
+            text(f"SELECT * FROM alert_logs {where} "
+                 f"ORDER BY `{safe_sort}` {safe_dir} "
+                 f"LIMIT :limit OFFSET :offset"),
+            qparams
+        ).mappings().all()
+
+        def _serialize(r):
+            out = {}
+            for k, v in r.items():
+                if hasattr(v, "isoformat"):
+                    out[k] = v.isoformat()
+                elif isinstance(v, Decimal):
+                    out[k] = float(v)
+                else:
+                    out[k] = v
+            return out
+
+        return jsonify(ok=True, data={
+            "items":   [_serialize(r) for r in rows],
+            "columns": cols,
+            "total":   total,
+            "page":    page,
+            "page_size": size,
+            "pages":   max(1, (total + size - 1) // size),
+            "meta": {
+                "name_col":     name_col,
+                "priority_col": priority_col,
+                "zone_col":     zone_col,
+                "timestamp_col": ts_col,
+                "dest_col":     dest_col,
+                "status_col":   status_col,
+            },
+        })
+    except Exception as e:
+        log.error("alert_logs query failed: %s", e)
+        return jsonify(ok=False, error=f"Failed to read alert_logs: {str(e)}"), 500
+
+
 # ============================================================
 # AUDIO ALERTS — Security Settings (in-memory; sensitive bits in system_config.json)
 # ============================================================
@@ -3037,6 +3463,20 @@ def _run_migrations():
     migrations = [
         "ALTER TABLE tts_templates ADD COLUMN IF NOT EXISTS alert_code VARCHAR(64)",
         "ALTER TABLE alert_rules    ADD COLUMN IF NOT EXISTS notify_emails JSON",
+        # New tables created automatically by SQLAlchemy — no ALTER needed
+        # but we add them here as safety guards:
+        """CREATE TABLE IF NOT EXISTS zone_language_configs (
+            id          INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            config_type VARCHAR(16) NOT NULL,
+            reference_id VARCHAR(64) NOT NULL,
+            language    VARCHAR(8) NOT NULL,
+            updated_at  DATETIME,
+            UNIQUE KEY uq_zlc_type_ref (config_type, reference_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS app_settings_kv (
+            `key`   VARCHAR(128) NOT NULL PRIMARY KEY,
+            `value` TEXT
+        )""",
     ]
     with db.engine.connect() as conn:
         for sql in migrations:
@@ -3122,6 +3562,13 @@ def _seed_lookups():
             db.session.add(AppZoneType(label=zt))
         db.session.commit()
         log.info("Seeded app_zone_types")
+
+    if AppNoTranslateWord.query.count() == 0:
+        for category, words in NO_TRANSLATE_PRESETS.items():
+            for word in words:
+                db.session.add(AppNoTranslateWord(word=word, category=category, is_preset=True))
+        db.session.commit()
+        log.info("Seeded app_no_translate_words")
 
         log.info("Seeded plants/lines/zones")
 

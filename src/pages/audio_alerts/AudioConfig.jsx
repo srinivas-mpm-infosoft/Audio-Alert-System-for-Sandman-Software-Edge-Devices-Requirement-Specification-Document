@@ -13,7 +13,8 @@ import { AUDIO_TYPES, PRIORITIES } from "./utils/constants";
 import { formatFileSize, formatDate } from "./utils/formatters";
 import AudioPreviewButton from "./components/AudioPreviewButton";
 
-const TABS = ["Voice Library", "TTS Templates", "Zones & Languages", "Volume & Audio Types"];
+//const TABS = ["Voice Library", "TTS Templates", "Zones & Languages", "Volume & Audio Types"];
+const TABS = ["Zones & Languages"];
 const INPUT = "w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 focus:border-zinc-400 text-slate-700";
 const LABEL = "text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block";
 
@@ -212,7 +213,7 @@ export default function AudioConfig() {
         <div className="p-5">
 
           {/* A. Voice Library */}
-          {tab === 0 && (
+          {/* {tab === 0  && (
             <div className="flex flex-col gap-4">
               {canUpload && (
                 <div className="flex justify-end">
@@ -264,10 +265,10 @@ export default function AudioConfig() {
                 </div>
               )}
             </div>
-          )}
+          )} */}
 
           {/* B. TTS Templates */}
-          {tab === 1 && (
+          {/* {tab === 1 && (
             <div className="flex flex-col gap-4">
               {canUpload && !editingTpl && (
                 <div className="flex justify-end">
@@ -335,10 +336,10 @@ export default function AudioConfig() {
               ))}
               {templates.length === 0 && !tplFormOpen && <EmptyState title="No templates" message="Create TTS templates with variable placeholders." />}
             </div>
-          )}
+          )} */}
 
           {/* C. Zones & Languages */}
-          {tab === 2 && (
+          {tab === 0 && (
             <div className="flex flex-col gap-4">
               {Object.keys(zonesDirty).length > 0 && (
                 <p className="text-xs text-amber-600 font-medium">You have unsaved language changes for {Object.keys(zonesDirty).length} zone(s).</p>
@@ -347,7 +348,8 @@ export default function AudioConfig() {
                 <table className="w-full text-sm" role="table">
                   <thead>
                     <tr className="border-b border-slate-100">
-                      {["Zone", "Default Language", "Fallback Language", "Morning", "Afternoon", "Night"].map((h) => (
+                      {/* ["Zone", "Default Language", "Fallback Language", "Morning", "Afternoon", "Night"] */}
+                      {["Zone", "Audio Language"].map((h) => (
                         <th key={h} className="px-4 py-3 text-left font-semibold text-slate-600 text-[11px] uppercase tracking-wide whitespace-nowrap">{h}</th>
                       ))}
                     </tr>
@@ -356,14 +358,15 @@ export default function AudioConfig() {
                     {zones.map((zone) => (
                       <tr key={zone.id} className={`hover:bg-slate-50/50 ${zonesDirty[zone.id] ? "bg-amber-50/30" : ""}`}>
                         <td className="px-4 py-3 font-medium text-slate-800">{zone.name}</td>
-                        {["default_language", "fallback_language", "morning_language", "afternoon_language", "night_language"].map((field) => (
+                        {/* ["default_language", "fallback_language", "morning_language", "afternoon_language", "night_language"] */}
+                        {["default_language"].map((field) => (
                           <td key={field} className="px-4 py-2">
                             <select
                               value={zone[field] ?? "EN"}
                               onChange={(e) => handleZoneFieldChange(zone.id, field, e.target.value)}
                               className="border border-slate-200 rounded-lg px-2 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 text-slate-700"
                             >
-                              {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.flag} {l.code}</option>)}
+                              {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.label}</option>)}
                             </select>
                           </td>
                         ))}
@@ -382,7 +385,7 @@ export default function AudioConfig() {
           )}
 
           {/* D. Volume & Audio Types */}
-          {tab === 3 && (
+          {tab === 1 && (
             <div className="flex flex-col gap-6">
               <div>
                 <label className={LABEL} htmlFor="master-vol">Master Volume</label>
@@ -392,19 +395,19 @@ export default function AudioConfig() {
                 </div>
               </div>
               <div>
-                <p className={LABEL}>Per-Priority Volume Offset (dB)</p>
+                <p className={LABEL}>Per-Priority Volume Offset (%)</p>
                 <div className="space-y-3">
                   {PRIORITIES.map((p) => (
                     <div key={p} className="flex items-center gap-4">
                       <span className="w-20 text-sm font-medium text-slate-700">{p}</span>
                       <input type="range" min={-12} max={12} value={priorityOffsets[p] ?? 0}
                         onChange={(e) => setPriorityOffset(p, +e.target.value)} className="flex-1 accent-indigo-600" />
-                      <span className="w-14 text-right font-bold text-slate-700 font-mono">{priorityOffsets[p] >= 0 ? "+" : ""}{priorityOffsets[p] ?? 0} dB</span>
+                      <span className="w-14 text-right font-bold text-slate-700 font-mono">{priorityOffsets[p] >= 0 ? "+" : ""}{priorityOffsets[p] ?? 0} %</span>
                     </div>
                   ))}
                 </div>
               </div>
-              <div>
+              {/* <div>
                 <p className={LABEL}>Audio Type per Priority</p>
                 <div className="space-y-2">
                   {PRIORITIES.map((p) => (
@@ -417,7 +420,7 @@ export default function AudioConfig() {
                     </div>
                   ))}
                 </div>
-              </div>
+              </div> */}
               <div className="flex justify-end pt-2 border-t border-slate-100">
                 <button type="button" onClick={handleSaveVolume} disabled={audioSaving}
                   className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50 inline-flex items-center gap-2">

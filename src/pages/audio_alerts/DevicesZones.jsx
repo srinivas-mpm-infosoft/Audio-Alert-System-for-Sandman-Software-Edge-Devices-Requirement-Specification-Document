@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Plus, ChevronRight, ChevronDown, Loader2, RefreshCw, Zap, RotateCcw, Settings, MapPin, Building2, Pencil, Trash2, Check, X } from "lucide-react";
+import { Plus, ChevronRight, ChevronDown, Loader2, RefreshCw, MapPin, Building2, Pencil, Trash2, Check, X, WifiOff, Edit2, Globe, Save } from "lucide-react";
 import { useDevices } from "./hooks/useDevices";
 import { useCan } from "./hooks/useCan";
 import {
-  testFireDevice, restartDevice, addDevice,
+  addDevice, updateDevice, getDeviceStatus,
   getPlants, getLines, getZones,
   createPlant, updatePlant, deletePlant,
   createLine, updateLine, deleteLine,
@@ -17,6 +17,7 @@ import ConfirmDialog from "./components/ConfirmDialog";
 import EmptyState from "./components/EmptyState";
 import { DEVICE_TYPES } from "./utils/constants";
 import { timeAgo } from "./utils/formatters";
+import { targetUrl as BASE_URL } from "../../config";
 
 const LABEL = "text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block";
 const INPUT = "w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 focus:border-zinc-400 text-slate-700";
@@ -36,9 +37,8 @@ function InlineEdit({ value, onSave, onCancel }) {
 }
 
 function DeviceTypeIcon({ type }) {
-  if (type === "Gateway") return <span className="text-indigo-600 font-bold text-xs">GW</span>;
-  if (type === "Speaker") return <span className="text-emerald-600 font-bold text-xs">SPK</span>;
-  return <span className="text-amber-600 font-bold text-xs">AMP</span>;
+  if (type === "Edge Node") return <span className="text-indigo-600 font-bold text-xs">EN</span>;
+  return <span className="text-slate-500 font-bold text-xs">{(type || "DEV").slice(0, 3).toUpperCase()}</span>;
 }
 
 function HeartbeatTime({ ts }) {
@@ -48,10 +48,158 @@ function HeartbeatTime({ ts }) {
   return <span className={`font-mono text-xs ${color}`}>{timeAgo(ts)}</span>;
 }
 
+async function apiFetch(method, path, body) {
+  try {
+    const r = await fetch(path, {
+      method,
+      credentials: "include",
+      headers: body ? { "Content-Type": "application/json" } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const json = await r.json();
+    return { ok: r.ok && json.ok !== false, ...json };
+  } catch (e) {
+    return { ok: false, error: "Network error" };
+  }
+}
+
+// ── Language Settings component ──────────────────────────────
+const LANG_TYPES = [
+  { key: "plant", label: "Plant-wise",  desc: "One language per plant — applies to all zones in that plant" },
+  { key: "zone",  label: "Zone-wise",   desc: "Individual language per zone" },
+  { key: "shift", label: "Shift-wise",  desc: "Language changes per shift (Morning / Afternoon / Night)" },
+];
+const SHIFTS = ["Morning", "Afternoon", "Night"];
+
+function LanguageSettings({ plants, zones, languages, showToast, canEdit }) {
+  const [activeType, setActiveType] = useState("zone");
+  const [configs, setConfigs]       = useState({ plant: {}, zone: {}, shift: {} });
+  const [loading, setLoading]       = useState(true);
+  const [saving, setSaving]         = useState(false);
+
+  useEffect(() => {
+    setLoading(true);
+    apiFetch("GET", `${BASE_URL}/audio-alerts/zone-language-config`)
+      .then((res) => {
+        if (res.ok) {
+          setActiveType(res.data?.active_type ?? "zone");
+          setConfigs(res.data?.configs ?? { plant: {}, zone: {}, shift: {} });
+        }
+      })
+      .finally(() => setLoading(false));
+  }, []);
+
+  const setLang = (type, refId, lang) =>
+    setConfigs((c) => ({ ...c, [type]: { ...c[type], [refId]: lang } }));
+
+  const handleSave = async () => {
+    setSaving(true);
+    const res = await apiFetch("PUT", `${BASE_URL}/audio-alerts/zone-language-config`, {
+      active_type: activeType,
+      configs,
+      apply: true,
+    });
+    setSaving(false);
+    if (res.ok) showToast("Language settings saved and applied to zones", "success");
+    else showToast(res.error || "Save failed", "error");
+  };
+
+  const LangSelect = ({ value, onChange }) => (
+    <select
+      value={value || "EN"}
+      onChange={(e) => onChange(e.target.value)}
+      disabled={!canEdit}
+      className="border border-slate-200 rounded-lg px-2 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-indigo-400 text-slate-700 disabled:bg-slate-50 disabled:text-slate-400"
+    >
+      {languages.map((l) => <option key={l.code} value={l.code}>{l.code} — {l.label}</option>)}
+    </select>
+  );
+
+  if (loading) return <div className="flex justify-center py-12"><Loader2 className="h-6 w-6 animate-spin text-indigo-600" /></div>;
+
+  return (
+    <div className="flex flex-col gap-5">
+      {/* Type selector */}
+      <div>
+        <p className={LABEL + " mb-2"}>Language Assignment Mode</p>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {LANG_TYPES.map((t) => (
+            <button key={t.key} type="button"
+              onClick={() => canEdit && setActiveType(t.key)}
+              className={`text-left px-4 py-3 rounded-xl border transition-colors ${activeType === t.key ? "border-indigo-400 bg-indigo-50" : "border-slate-200 bg-white hover:border-slate-300"} ${!canEdit ? "cursor-default" : "cursor-pointer"}`}>
+              <p className={`text-xs font-bold mb-0.5 ${activeType === t.key ? "text-indigo-700" : "text-slate-700"}`}>{t.label}</p>
+              <p className="text-[11px] text-slate-400 leading-snug">{t.desc}</p>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Plant-wise */}
+      {activeType === "plant" && (
+        <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-3">
+          <p className={LABEL}>Language per Plant</p>
+          {plants.length === 0 && <p className="text-xs text-slate-400 italic">No plants configured.</p>}
+          {plants.map((p) => (
+            <div key={p.id} className="flex items-center justify-between gap-4">
+              <span className="text-sm font-medium text-slate-700 flex-1">{p.name} <span className="text-xs text-slate-400">({p.location})</span></span>
+              <LangSelect value={configs.plant[p.id] || "EN"} onChange={(v) => setLang("plant", p.id, v)} />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Zone-wise */}
+      {activeType === "zone" && (
+        <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-2">
+          <p className={LABEL}>Language per Zone</p>
+          {zones.length === 0 && <p className="text-xs text-slate-400 italic">No zones configured.</p>}
+          <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+            {zones.map((z) => (
+              <div key={z.id} className="flex items-center justify-between gap-4">
+                <div className="flex-1 min-w-0">
+                  <span className="text-sm font-medium text-slate-700">{z.name}</span>
+                  <span className="ml-1.5 text-[11px] text-slate-400">{z.type}</span>
+                </div>
+                <LangSelect value={configs.zone[z.id] || z.default_language || "EN"} onChange={(v) => setLang("zone", z.id, v)} />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Shift-wise */}
+      {activeType === "shift" && (
+        <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-3">
+          <p className={LABEL}>Language per Shift</p>
+          <p className="text-xs text-slate-400">The selected language will be applied to all zones during that shift.</p>
+          {SHIFTS.map((s) => (
+            <div key={s} className="flex items-center justify-between gap-4">
+              <span className="text-sm font-medium text-slate-700 w-28">{s}</span>
+              <LangSelect value={configs.shift[s] || "EN"} onChange={(v) => setLang("shift", s, v)} />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Save */}
+      {canEdit && (
+        <div className="flex justify-end">
+          <button type="button" onClick={handleSave} disabled={saving}
+            className="inline-flex items-center gap-2 px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-semibold disabled:opacity-50 transition-colors">
+            {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+            {saving ? "Saving…" : "Save & Apply to Zones"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Plant Structure management panel ─────────────────────────
 function PlantManagement({ showToast }) {
-  const ZONE_TYPES = useAppConfigStore((s) => s.zone_types);
-  const LANGUAGES  = useAppConfigStore((s) => s.languages);
+  const ZONE_TYPES        = useAppConfigStore((s) => s.zone_types);
+  const LANGUAGES         = useAppConfigStore((s) => s.languages);
+  const refreshLanguages  = useAppConfigStore((s) => s.refreshLanguages);
   const canEdit = useCan("aa.zones.edit");
   const [plants, setPlants] = useState([]);
   const [lines, setLines]   = useState([]);
@@ -76,8 +224,9 @@ function PlantManagement({ showToast }) {
     if (pr.ok) setPlants(pr.data);
     if (lr.ok) setLines(lr.data);
     if (zr.ok) setZones(zr.data);
+    await refreshLanguages();
     setLoading(false);
-  }, []);
+  }, [refreshLanguages]);
 
   useEffect(() => { reload(); }, [reload]);
 
@@ -119,15 +268,28 @@ function PlantManagement({ showToast }) {
   const handleAddZone = async () => {
     if (!newZone.name.trim() || !newZone.line_id) return;
     const plant_id = lines.find((l) => l.id === newZone.line_id)?.plant_id || newZone.plant_id;
-    const res = await createZone({ ...newZone, plant_id });
-    if (res.ok) { showToast("Zone added", "success"); setNewZone({ name: "", type: "Melting", line_id: "", plant_id: "", default_language: "EN" }); setAddOpen(false); reload(); }
-    else showToast(res.error || "Failed", "error");
+    if (!plant_id) { showToast("Could not determine plant for selected line", "error"); return; }
+    const zoneType = newZone.type || (ZONE_TYPES[0] ?? "Custom");
+    try {
+      const res = await createZone({ ...newZone, type: zoneType, plant_id });
+      if (res.ok) {
+        showToast("Zone added", "success");
+        setNewZone({ name: "", type: ZONE_TYPES[0] || "Custom", line_id: "", plant_id: "", default_language: "EN" });
+        setAddOpen(false);
+        reload();
+      } else {
+        showToast(res.error || "Failed to add zone", "error");
+      }
+    } catch (e) {
+      showToast("Network error", "error");
+    }
   };
 
   const SECTIONS = [
-    { key: "plants", label: "Plants", count: plants.length },
-    { key: "lines",  label: "Lines",  count: lines.length },
-    { key: "zones",  label: "Zones",  count: zones.length },
+    { key: "plants",    label: "Plants",    count: plants.length },
+    { key: "lines",     label: "Lines",     count: lines.length },
+    { key: "zones",     label: "Zones",     count: zones.length },
+    // { key: "languages", label: "Languages", count: null },
   ];
 
   if (loading) return <div className="flex justify-center py-16"><Loader2 className="h-7 w-7 animate-spin text-indigo-600" /></div>;
@@ -212,7 +374,7 @@ function PlantManagement({ showToast }) {
                 <div>
                   <label className={LABEL}>Default Language</label>
                   <select className={INPUT} value={newZone.default_language} onChange={(e) => setNewZone((z) => ({ ...z, default_language: e.target.value }))}>
-                    {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.flag} {l.label}</option>)}
+                    {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.label}</option>)}
                   </select>
                 </div>
               </div>
@@ -295,7 +457,8 @@ function PlantManagement({ showToast }) {
         {activeSection === "zones" && (
           <table className="w-full text-sm">
             <thead><tr className="border-b border-slate-100 bg-slate-50/60">
-              {["Zone Name", "Type", "Line", "Plant", "Default Lang", ""].map((h) => <th key={h} className="px-4 py-3 text-left text-[11px] font-semibold text-slate-600 uppercase tracking-wide">{h}</th>)}
+            {/* ["Zone Name", "Type", "Line", "Plant", "Default Lang", ""] */}
+              {["Zone Name", "Type", "Line", "Plant", ""].map((h) => <th key={h} className="px-4 py-3 text-left text-[11px] font-semibold text-slate-600 uppercase tracking-wide">{h}</th>)}
             </tr></thead>
             <tbody className="divide-y divide-slate-50">
               {zones.map((z) => {
@@ -311,17 +474,17 @@ function PlantManagement({ showToast }) {
                     <td className="px-4 py-3 text-xs text-slate-500">{z.type}</td>
                     <td className="px-4 py-3 text-xs text-slate-500">{line?.name || z.line_id}</td>
                     <td className="px-4 py-3 text-xs text-slate-500">{plant?.name || "—"}</td>
-                    <td className="px-4 py-3 text-xs">
+                    {/* <td className="px-4 py-3 text-xs">
                       {canEdit ? (
                         <select value={z.default_language || "EN"}
                           onChange={(e) => handleSaveEdit("zone", z.id, "default_language", e.target.value)}
                           className="border border-slate-200 rounded px-2 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 text-slate-700">
-                          {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.flag} {l.code}</option>)}
+                          {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.code}</option>)}
                         </select>
                       ) : (
-                        LANGUAGES.find((l) => l.code === z.default_language)?.flag + " " + (z.default_language || "EN")
+                        LANGUAGES.find((l) => l.code === z.default_language)?.(z.default_language || "EN")
                       )}
-                    </td>
+                    </td> */}
                     <td className="px-4 py-3">
                       {canEdit && (
                         <div className="flex gap-1 justify-end">
@@ -336,6 +499,17 @@ function PlantManagement({ showToast }) {
               {zones.length === 0 && <tr><td colSpan={6}><EmptyState title="No zones" message="Add zones to lines." /></td></tr>}
             </tbody>
           </table>
+        )}
+
+        {/* ── Language Settings ────────────────────────────────────── */}
+        {activeSection === "languages" && (
+          <LanguageSettings
+            plants={plants}
+            zones={zones}
+            languages={LANGUAGES}
+            showToast={showToast}
+            canEdit={canEdit}
+          />
         )}
       </div>
 
@@ -367,11 +541,19 @@ export default function DevicesZones() {
   const [selectedZone, setSelectedZone]     = useState(null);
   const [expandedPlants, setExpandedPlants] = useState(new Set());
   const [expandedLines, setExpandedLines]   = useState(new Set());
-  const [confirmAction, setConfirmAction]   = useState(null);
   const [addWizardOpen, setAddWizardOpen]   = useState(false);
   const [wizardStep, setWizardStep]         = useState(1);
-  const [newDevice, setNewDevice]           = useState({ name: "", type: "Gateway", ip: "", mac: "", zone_id: "" });
-  const [busyAction, setBusyAction]         = useState(null);
+  const [newDevice, setNewDevice]           = useState({ name: "", type: "Edge Node", ip: "", mac: "", zone_id: "" });
+
+  // Heartbeat / status fetch state
+  const [deviceStatus, setDeviceStatus]         = useState(null);
+  const [deviceStatusLoading, setDeviceStatusLoading] = useState(false);
+  const [deviceStatusError, setDeviceStatusError]     = useState(null);
+
+  // Edit-IP modal state
+  const [editIpOpen, setEditIpOpen]   = useState(false);
+  const [editIpValue, setEditIpValue] = useState("");
+  const [savingIp, setSavingIp]       = useState(false);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
@@ -381,28 +563,49 @@ export default function DevicesZones() {
     }
   }, [plants, lines]);
 
-  const filteredDevices = devices.filter((d) => {
-    if (selectedZone && d.zone_id !== selectedZone) return false;
-    if (!selectedZone && selectedLine && !zones.filter((z) => z.line_id === selectedLine).some((z) => z.id === d.zone_id)) return false;
-    if (!selectedZone && !selectedLine && selectedPlant && d.plant !== plants.find((p) => p.id === selectedPlant)?.name) return false;
-    return true;
-  });
+  // Fetch device status whenever selected device changes
+  useEffect(() => {
+    if (!selectedDevice?.id || !selectedDevice?.address) {
+      setDeviceStatus(null);
+      setDeviceStatusError(null);
+      return;
+    }
+    setDeviceStatus(null);
+    setDeviceStatusError(null);
+    setDeviceStatusLoading(true);
+    getDeviceStatus(selectedDevice.id)
+      .then((res) => {
+        if (res.ok) setDeviceStatus(res.data);
+        else setDeviceStatusError(res.error || "Device unreachable");
+      })
+      .catch(() => setDeviceStatusError("Failed to connect to device"))
+      .finally(() => setDeviceStatusLoading(false));
+  }, [selectedDevice?.id]);
 
-  const handleTestFire = async (id) => {
-    setBusyAction("test-" + id);
-    const res = await testFireDevice(id);
-    if (res.ok) showToast("Test beep sent successfully", "success");
-    else showToast("Test fire failed", "error");
-    setBusyAction(null); setConfirmAction(null);
+  const handleSaveIp = async () => {
+    if (!editIpValue.trim() || !selectedDevice) return;
+    setSavingIp(true);
+    const res = await updateDevice(selectedDevice.id, { address: editIpValue.trim() });
+    setSavingIp(false);
+    if (res.ok) {
+      showToast("IP address updated", "success");
+      setEditIpOpen(false);
+      setSelectedDevice((d) => ({ ...d, address: editIpValue.trim(), ip: editIpValue.trim() }));
+      await refreshDevices();
+    } else {
+      showToast(res.error || "Failed to update IP", "error");
+    }
   };
 
-  const handleRestart = async (id) => {
-    setBusyAction("restart-" + id);
-    const res = await restartDevice(id, user?.username);
-    if (res.ok) showToast("Restart command sent", "success");
-    else showToast("Restart failed", "error");
-    setBusyAction(null); setConfirmAction(null);
-  };
+  // Exclude Modbus TCP / RTU devices — they are managed in the Modbus config pages
+  const filteredDevices = devices
+    .filter((d) => !d.type?.toLowerCase().includes("modbus"))
+    .filter((d) => {
+      if (selectedZone && d.zone_id !== selectedZone) return false;
+      if (!selectedZone && selectedLine && !zones.filter((z) => z.line_id === selectedLine).some((z) => z.id === d.zone_id)) return false;
+      if (!selectedZone && !selectedLine && selectedPlant && d.plant !== plants.find((p) => p.id === selectedPlant)?.name) return false;
+      return true;
+    });
 
   const handleAddDevice = async () => {
     const res = await addDevice(newDevice, user?.username);
@@ -506,7 +709,7 @@ export default function DevicesZones() {
               <table className="w-full text-sm" role="table">
                 <thead>
                   <tr className="border-b border-slate-100 bg-slate-50/60">
-                    {["Name", "Type", "Zone", "IP", "Firmware", "Last Heartbeat", "Status", ""].map((h) => (
+                    {["Name", "Type", "Zone", "IP", "Last Heartbeat", "Status", ""].map((h) => (
                       <th key={h} className="px-4 py-3 text-left font-semibold text-slate-600 text-[11px] uppercase tracking-wide whitespace-nowrap">{h}</th>
                     ))}
                   </tr>
@@ -518,19 +721,18 @@ export default function DevicesZones() {
                       <td className="px-4 py-3 font-medium text-slate-800 text-sm">{d.name}</td>
                       <td className="px-4 py-3"><div className="flex items-center gap-1.5 text-xs"><DeviceTypeIcon type={d.type} />{d.type}</div></td>
                       <td className="px-4 py-3 text-slate-500 text-xs">{d.zone_name}</td>
-                      <td className="px-4 py-3 font-mono text-xs text-slate-500">{d.ip}</td>
-                      <td className="px-4 py-3 text-xs text-slate-500">{d.firmware}</td>
+                      <td className="px-4 py-3 font-mono text-xs text-slate-500">{d.address || d.ip || "—"}</td>
                       <td className="px-4 py-3"><HeartbeatTime ts={d.last_heartbeat} /></td>
                       <td className="px-4 py-3"><StatusPill status={d.status} /></td>
                       <td className="px-4 py-3">
-                        <button type="button" onClick={(e) => { e.stopPropagation(); setSelectedDevice(d); }} className="p-1 rounded text-slate-400 hover:text-indigo-600">
-                          <Settings size={14} />
+                        <button type="button" onClick={(e) => { e.stopPropagation(); setSelectedDevice(d); }} className="p-1 rounded text-slate-400 hover:text-indigo-600" title="View details">
+                          <Edit2 size={14} />
                         </button>
                       </td>
                     </tr>
                   ))}
                   {filteredDevices.length === 0 && (
-                    <tr><td colSpan={8}><EmptyState title="No devices" message="No devices match the current selection." /></td></tr>
+                    <tr><td colSpan={7}><EmptyState title="No devices" message="No devices match the current selection." /></td></tr>
                   )}
                 </tbody>
               </table>
@@ -539,19 +741,73 @@ export default function DevicesZones() {
 
           {/* Right: Device detail */}
           {selectedDevice && (
-            <div className="w-72 shrink-0 bg-white rounded-xl border border-slate-200 shadow-sm overflow-y-auto">
+            <div className="w-80 shrink-0 bg-white rounded-xl border border-slate-200 shadow-sm overflow-y-auto">
               <div className="p-4 border-b border-slate-100 flex items-center justify-between">
                 <div>
                   <p className="font-semibold text-slate-800 text-sm">{selectedDevice.name}</p>
-                  <p className="text-xs text-slate-400">{selectedDevice.type} • {selectedDevice.ip}</p>
+                  <p className="text-xs text-slate-400">{selectedDevice.type}</p>
                 </div>
                 <button type="button" onClick={() => setSelectedDevice(null)} className="text-slate-400 hover:text-slate-600 text-lg leading-none">×</button>
               </div>
               <div className="p-4 flex flex-col gap-4">
                 <StatusPill status={selectedDevice.status} />
+
+                {/* IP Address */}
+                <div>
+                  <p className={LABEL}>IP Address</p>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-sm text-slate-700 flex-1">
+                      {selectedDevice.address || selectedDevice.ip || <span className="text-slate-400 italic">Not set</span>}
+                    </span>
+                    {canEdit && (
+                      <button type="button"
+                        onClick={() => { setEditIpValue(selectedDevice.address || selectedDevice.ip || ""); setEditIpOpen(true); }}
+                        className="p-1 rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+                        title="Edit IP address">
+                        <Edit2 size={13} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Last Heartbeat (from DB) */}
+                <div>
+                  <p className={LABEL}>Last Heartbeat (DB)</p>
+                  <HeartbeatTime ts={selectedDevice.last_heartbeat || selectedDevice.last_seen} />
+                </div>
+
+                {/* Live Status from device */}
+                <div>
+                  <p className={LABEL}>Live Device Status</p>
+                  {!selectedDevice.address && !selectedDevice.ip ? (
+                    <p className="text-xs text-slate-400 italic">No IP address configured</p>
+                  ) : deviceStatusLoading ? (
+                    <div className="flex items-center gap-1.5 text-xs text-slate-400">
+                      <Loader2 size={12} className="animate-spin" /> Fetching from device…
+                    </div>
+                  ) : deviceStatusError ? (
+                    <div className="flex items-center gap-1.5 text-xs text-red-500">
+                      <WifiOff size={12} /> {deviceStatusError}
+                    </div>
+                  ) : deviceStatus ? (
+                    <div className="space-y-1 mt-1">
+                      {Object.entries(deviceStatus).map(([k, v]) => (
+                        <div key={k} className="flex justify-between text-xs">
+                          <span className="text-slate-500 capitalize">{k.replace(/_/g, " ")}</span>
+                          <span className="font-mono font-semibold text-slate-700 max-w-[140px] truncate" title={String(v)}>
+                            {typeof v === "object" ? JSON.stringify(v) : String(v)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-slate-400 italic">No status data</p>
+                  )}
+                </div>
+
                 {selectedDevice.metrics && (
                   <div>
-                    <p className={LABEL}>Live Metrics</p>
+                    <p className={LABEL}>Stored Metrics</p>
                     <div className="space-y-1">
                       {selectedDevice.type === "Gateway" && <>
                         <div className="flex justify-between text-xs"><span className="text-slate-500">CPU</span><span className="font-mono font-semibold">{selectedDevice.metrics.cpu ?? "—"}%</span></div>
@@ -566,37 +822,72 @@ export default function DevicesZones() {
                     </div>
                   </div>
                 )}
-                {canEdit && (
-                  <div>
-                    <p className={LABEL}>Actions</p>
-                    <div className="flex flex-col gap-2">
-                      <button type="button" onClick={() => setConfirmAction({ type: "test", id: selectedDevice.id, name: selectedDevice.name })}
-                        className="w-full flex items-center gap-2 px-3 py-2 border border-emerald-200 text-emerald-700 rounded-lg text-xs font-medium hover:bg-emerald-50 transition-colors">
-                        <Zap size={12} /> Test Fire (Beep)
-                      </button>
-                      <button type="button" onClick={() => setConfirmAction({ type: "restart", id: selectedDevice.id, name: selectedDevice.name })}
-                        className="w-full flex items-center gap-2 px-3 py-2 border border-amber-200 text-amber-700 rounded-lg text-xs font-medium hover:bg-amber-50 transition-colors">
-                        <RotateCcw size={12} /> Restart Device
-                      </button>
-                    </div>
+
+                <div>
+                  <p className={LABEL}>Actions</p>
+                  <div className="flex flex-col gap-2">
+                    <button type="button"
+                      disabled={deviceStatusLoading || !selectedDevice.address}
+                      onClick={() => {
+                        if (!selectedDevice?.address) return;
+                        setDeviceStatus(null);
+                        setDeviceStatusError(null);
+                        setDeviceStatusLoading(true);
+                        getDeviceStatus(selectedDevice.id)
+                          .then((res) => {
+                            if (res.ok) setDeviceStatus(res.data);
+                            else setDeviceStatusError(res.error || "Device unreachable");
+                          })
+                          .catch(() => setDeviceStatusError("Failed to connect"))
+                          .finally(() => setDeviceStatusLoading(false));
+                      }}
+                      className="w-full flex items-center gap-2 px-3 py-2 border border-indigo-200 text-indigo-700 rounded-lg text-xs font-medium hover:bg-indigo-50 transition-colors disabled:opacity-50">
+                      {deviceStatusLoading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                      {deviceStatusLoading ? "Fetching Status…" : "Refresh Status"}
+                    </button>
                   </div>
-                )}
-                {selectedDevice.events && selectedDevice.events.length > 0 && (
-                  <div>
-                    <p className={LABEL}>Recent Events</p>
-                    <div className="space-y-1.5">
-                      {selectedDevice.events.map((ev, i) => (
-                        <div key={i} className="text-xs">
-                          <p className="text-slate-700">{ev.msg}</p>
-                          <p className="text-slate-400 font-mono">{timeAgo(ev.ts)}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                </div>
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Edit IP Modal */}
+      {editIpOpen && selectedDevice && (
+        <div className="fixed inset-0 z-[999] flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40" onClick={() => setEditIpOpen(false)} />
+          <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-sm mx-4 p-6 z-10 flex flex-col gap-4">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-slate-900 text-sm">Edit Device Details</h3>
+              <button type="button" onClick={() => setEditIpOpen(false)} className="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500 mb-1">Device: <span className="font-medium text-slate-700">{selectedDevice.name}</span></p>
+            </div>
+            <div>
+              <label className={LABEL} htmlFor="edit-ip">IP Address</label>
+              <input
+                id="edit-ip"
+                className={INPUT}
+                value={editIpValue}
+                onChange={(e) => setEditIpValue(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleSaveIp()}
+                placeholder="e.g. 192.168.1.100"
+                autoFocus
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-1 border-t border-slate-100">
+              <button type="button" onClick={() => setEditIpOpen(false)}
+                className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm text-slate-600 hover:bg-slate-50">
+                Cancel
+              </button>
+              <button type="button" onClick={handleSaveIp} disabled={savingIp || !editIpValue.trim()}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50">
+                {savingIp ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Save
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -619,7 +910,7 @@ export default function DevicesZones() {
                   </select>
                 </div>
                 <div><label className={LABEL} htmlFor="dev-ip">IP Address</label><input id="dev-ip" className={INPUT} value={newDevice.ip} onChange={(e) => setNewDevice((d) => ({ ...d, ip: e.target.value }))} placeholder="192.168.1.xx" /></div>
-                <div><label className={LABEL} htmlFor="dev-mac">MAC Address</label><input id="dev-mac" className={INPUT} value={newDevice.mac} onChange={(e) => setNewDevice((d) => ({ ...d, mac: e.target.value }))} placeholder="AA:BB:CC:DD:EE:FF" /></div>
+                {/* <div><label className={LABEL} htmlFor="dev-mac">MAC Address</label><input id="dev-mac" className={INPUT} value={newDevice.mac} onChange={(e) => setNewDevice((d) => ({ ...d, mac: e.target.value }))} placeholder="AA:BB:CC:DD:EE:FF" /></div> */}
               </div>
             )}
             {wizardStep === 2 && (
@@ -657,15 +948,6 @@ export default function DevicesZones() {
         </div>
       )}
 
-      <ConfirmDialog
-        open={!!confirmAction}
-        title={confirmAction?.type === "test" ? "Test Fire Device" : "Restart Device"}
-        message={confirmAction?.type === "test" ? `Play a test beep on "${confirmAction?.name}"?` : `Restart "${confirmAction?.name}"? This will interrupt active playback.`}
-        confirmLabel={confirmAction?.type === "test" ? "Fire Test Beep" : "Restart"}
-        onConfirm={() => confirmAction?.type === "test" ? handleTestFire(confirmAction.id) : handleRestart(confirmAction.id)}
-        onCancel={() => setConfirmAction(null)}
-        variant={confirmAction?.type === "restart" ? "danger" : "primary"}
-      />
     </div>
   );
 }

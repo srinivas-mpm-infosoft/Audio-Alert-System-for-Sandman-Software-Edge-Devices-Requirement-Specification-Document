@@ -1135,7 +1135,7 @@ export default function ScadaHmiForm({
               <option>HTTP / HTTPS</option>
               <option>OPC UA</option>
               <option>File Based Sharing</option>
-              <option>Modbus TCP</option>
+              <option>Ethernet TCP/IP</option>
             </select>
           </div>
         </div>

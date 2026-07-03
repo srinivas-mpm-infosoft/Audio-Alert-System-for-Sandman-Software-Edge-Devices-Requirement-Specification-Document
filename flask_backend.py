@@ -289,7 +289,7 @@ def _cors_response(response, status=None):
 def _build_db_uri(db: dict) -> str:
     return (
         f"mysql+pymysql://{db.get('user','gateway')}:{db.get('password','gateway')}"
-        f"@{db.get('host','localhost')}:{db.get('port',3306)}/{db.get('name','gateway')}"
+        f"@localhost:{db.get('port',3306)}/{db.get('name','gateway')}"
         f"?charset=utf8mb4"          # ← this is the only addition
     )
 
@@ -1561,6 +1561,48 @@ def aa_config_audio_put():
     _audio_config_runtime.update(request.json or {})
     return jsonify(ok=True, data=_audio_config_runtime)
 
+
+_ALERT_ESCALATION_KEY = "alert_escalation_config"
+_ALERT_ESCALATION_DEFAULTS = {
+    "initial_interval_sec": 60,
+    "escalation_after_sec": 120,
+    "reduction_step_sec": 30,
+    "min_interval_sec": 10,
+}
+
+
+def _get_alert_escalation_config() -> dict:
+    raw = _kv_get(_ALERT_ESCALATION_KEY, "")
+    if raw:
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+    return dict(_ALERT_ESCALATION_DEFAULTS)
+
+
+@app.route("/audio-alerts/config/alert-escalation", methods=["GET"])
+def aa_alert_escalation_get():
+    err = _require_login()
+    if err: return err
+    return jsonify(ok=True, data=_get_alert_escalation_config())
+
+
+@app.route("/audio-alerts/config/alert-escalation", methods=["PUT"])
+def aa_alert_escalation_put():
+    err = _require_login()
+    if err: return err
+    data = request.json or {}
+    config = {
+        "initial_interval_sec": max(1, int(data.get("initial_interval_sec", _ALERT_ESCALATION_DEFAULTS["initial_interval_sec"]))),
+        "escalation_after_sec": max(1, int(data.get("escalation_after_sec", _ALERT_ESCALATION_DEFAULTS["escalation_after_sec"]))),
+        "reduction_step_sec":   max(1, int(data.get("reduction_step_sec",   _ALERT_ESCALATION_DEFAULTS["reduction_step_sec"]))),
+        "min_interval_sec":     max(1, int(data.get("min_interval_sec",     _ALERT_ESCALATION_DEFAULTS["min_interval_sec"]))),
+    }
+    _kv_set(_ALERT_ESCALATION_KEY, json.dumps(config))
+    db.session.commit()
+    _add_audit("config.change", "alert_escalation", "Alert escalation config updated", after=config)
+    return jsonify(ok=True, data=config)
 
 
 @app.route("/audio-alerts/config/app-settings", methods=["GET"])
@@ -3581,20 +3623,6 @@ if __name__ == "__main__":
             if is_mysql_up():
                 try:
                     db.create_all()
-                    log.info("Database tables ready")
-                    _run_migrations()
-                    _seed_users()
-                    _seed_lookups()
-                    sync_config_to_db()
-                    break
-                except Exception as exc:
-                    log.error("DB init failed: %s", exc)
-            else:
-                log.warning("MySQL not reachable (attempt %d/10) …", attempt + 1)
-            time.sleep(2)
-
-    sc   = _read_sc()
-    host = sc.get("app", {}).get("server_host", "0.0.0.0")
-    port = sc.get("app", {}).get("server_port", 8000)
-    log.info("Listening on %s:%s", host, port)
-    app.run(host=host, port=port, threaded=True)
+                except:
+                    print("DB Not connected")
+    app.run("0.0.0.0", port=8000)

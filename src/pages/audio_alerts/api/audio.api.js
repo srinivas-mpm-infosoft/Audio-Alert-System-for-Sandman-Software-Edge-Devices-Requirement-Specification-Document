@@ -92,6 +92,22 @@ export async function saveAudioConfig(config) {
   return res.json();
 }
 
+// ── Alert Escalation Config ────────────────────────────────────
+
+export async function getAlertEscalationConfig() {
+  const res = await fetch(`${targetUrl}/audio-alerts/config/alert-escalation`, { credentials: "include" });
+  return res.json();
+}
+
+export async function saveAlertEscalationConfig(config) {
+  const res = await fetch(`${targetUrl}/audio-alerts/config/alert-escalation`, {
+    method: "PUT", credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+  return res.json();
+}
+
 // ── Preview ────────────────────────────────────────────────────
 
 export async function previewAudio(payload) {

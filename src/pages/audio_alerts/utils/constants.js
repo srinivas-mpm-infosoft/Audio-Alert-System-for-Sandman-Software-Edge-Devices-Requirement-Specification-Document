@@ -81,6 +81,14 @@ export const PERMISSIONS = [
   { id: "aa.audit.view", label: "View audit log", category: "Logs" },
   { id: "aa.users.manage", label: "Manage users", category: "Admin" },
   { id: "aa.security.manage", label: "Change security settings", category: "Admin" },
+  { id: "aa.schedule.view", label: "View scheduled announcements", category: "Scheduling" },
+  { id: "aa.schedule.edit", label: "Create / edit scheduled announcements", category: "Scheduling" },
+  { id: "aa.paging.use", label: "Use live voice paging", category: "Monitoring" },
+  { id: "aa.sop.view", label: "View SOPs and executions", category: "SOP" },
+  { id: "aa.sop.edit", label: "Create / edit SOPs", category: "SOP" },
+  { id: "aa.sop.delete", label: "Delete SOPs", category: "SOP" },
+  { id: "aa.sop.run", label: "Start / cancel SOP executions", category: "SOP" },
+  { id: "aa.sop.ack", label: "Acknowledge SOP steps", category: "SOP" },
 ];
 
 export const ROLE_PERMISSIONS = {
@@ -92,6 +100,8 @@ export const ROLE_PERMISSIONS = {
     "aa.devices.view", "aa.devices.edit", "aa.devices.firmware",
     "aa.zones.edit", "aa.analytics.view", "aa.analytics.export",
     "aa.logs.view", "aa.logs.export", "aa.audit.view",
+    "aa.schedule.view", "aa.schedule.edit", "aa.paging.use",
+    "aa.sop.view", "aa.sop.edit", "aa.sop.delete", "aa.sop.run", "aa.sop.ack",
   ]),
   process_engineer: new Set([
     "aa.live.view", "aa.alerts.ack", "aa.broadcast.manual",
@@ -100,6 +110,8 @@ export const ROLE_PERMISSIONS = {
     "aa.devices.view",
     "aa.analytics.view", "aa.analytics.export",
     "aa.logs.view", "aa.logs.export",
+    "aa.schedule.view", "aa.schedule.edit", "aa.paging.use",
+    "aa.sop.view", "aa.sop.edit", "aa.sop.delete", "aa.sop.run", "aa.sop.ack",
   ]),
   shift_supervisor: new Set([
     "aa.live.view", "aa.alerts.ack", "aa.broadcast.manual",
@@ -107,23 +119,28 @@ export const ROLE_PERMISSIONS = {
     "aa.devices.view",
     "aa.analytics.view",
     "aa.logs.view",
+    "aa.schedule.view", "aa.paging.use",
+    "aa.sop.view", "aa.sop.run", "aa.sop.ack",
   ]),
   operator: new Set([
     "aa.live.view", "aa.alerts.ack",
     "aa.analytics.view",
     "aa.logs.view",
+    "aa.sop.view", "aa.sop.run", "aa.sop.ack",
   ]),
   maintenance_technician: new Set([
     "aa.live.view",
     "aa.devices.view", "aa.devices.edit",
     "aa.analytics.view",
     "aa.logs.view",
+    "aa.sop.view",
   ]),
   auditor: new Set([
     "aa.live.view",
     "aa.analytics.view",
     "aa.logs.view",
     "aa.audit.view",
+    "aa.sop.view",
   ]),
 };
 

@@ -23,3 +23,9 @@ export async function getAlertDeviceLogs(filters = {}, page = 1, pageSize = 50) 
   const res = await fetch(`${targetUrl}/audio-alerts/logs/alert-device?${params}`, { credentials: "include" });
   return res.json();
 }
+
+export async function getAnnouncementHistory(filters = {}, page = 1, pageSize = 50) {
+  const params = buildParams({ ...filters, page, page_size: pageSize });
+  const res = await fetch(`${targetUrl}/audio-alerts/announcements/history?${params}`, { credentials: "include" });
+  return res.json();
+}

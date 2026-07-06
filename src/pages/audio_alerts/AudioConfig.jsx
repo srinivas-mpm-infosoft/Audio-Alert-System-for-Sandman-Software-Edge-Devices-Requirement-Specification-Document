@@ -13,8 +13,8 @@ import { AUDIO_TYPES, PRIORITIES } from "./utils/constants";
 import { formatFileSize, formatDate } from "./utils/formatters";
 import AudioPreviewButton from "./components/AudioPreviewButton";
 
-//const TABS = ["Voice Library", "TTS Templates", "Zones & Languages", "Volume & Audio Types"];
-const TABS = ["Zones & Languages", "Alert Configuration"];
+//const TABS_FULL = ["Voice Library", "TTS Templates", "Zones & Languages", "Volume & Audio Types"];
+const TABS = ["Voice Library", "Zones & Languages", "Alert Configuration"];
 const INPUT = "w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 focus:border-zinc-400 text-slate-700";
 const LABEL = "text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block";
 
@@ -246,8 +246,8 @@ export default function AudioConfig() {
 
         <div className="p-5">
 
-          {/* A. Voice Library */}
-          {/* {tab === 0  && (
+          {/* A. Voice Library — shared Pre-Recorded Audio Library (D1) */}
+          {tab === 0 && (
             <div className="flex flex-col gap-4">
               {canUpload && (
                 <div className="flex justify-end">
@@ -295,11 +295,11 @@ export default function AudioConfig() {
                       </div>
                     </div>
                   ))}
-                  {clips.length === 0 && <div className="col-span-3"><EmptyState title="No clips uploaded" message="Upload WAV or MP3 files to use in alert rules." /></div>}
+                  {clips.length === 0 && <div className="col-span-3"><EmptyState title="No clips uploaded" message="Upload WAV or MP3 files to use in manual broadcasts, schedules, and SOP steps." /></div>}
                 </div>
               )}
             </div>
-          )} */}
+          )}
 
           {/* B. TTS Templates */}
           {/* {tab === 1 && (
@@ -373,7 +373,7 @@ export default function AudioConfig() {
           )} */}
 
           {/* C. Zones & Languages */}
-          {tab === 0 && (
+          {tab === 1 && (
             <div className="flex flex-col gap-4">
               {Object.keys(zonesDirty).length > 0 && (
                 <p className="text-xs text-amber-600 font-medium">You have unsaved language changes for {Object.keys(zonesDirty).length} zone(s).</p>
@@ -419,7 +419,7 @@ export default function AudioConfig() {
           )}
 
           {/* D. Alert Configuration */}
-          {tab === 1 && (
+          {tab === 2 && (
             <div className="flex flex-col gap-6">
               <div className="flex items-center gap-2 pb-3 border-b border-slate-100">
                 <Bell size={16} className="text-amber-500" />

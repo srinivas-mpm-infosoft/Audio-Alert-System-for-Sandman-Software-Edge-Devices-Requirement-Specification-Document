@@ -1,0 +1,23 @@
+# edge-services — deploy alongside each other:
+#   edge_node.py     -> every RPi4 speaker node (port 5000)
+#   tts_server.py    -> CM5 gateway (port 6000) — needs GEMINI_API_KEY + VOICEMAKER_API_KEY env vars
+#   alert_poller.py  -> CM5 gateway (port 7000)
+#
+# System packages also required (not pip-installable):
+#   ffmpeg, vlc (cvlc), alsa-utils (aplay)
+
+flask
+requests
+pymysql
+
+# tts_server.py
+google-genai
+websocket-client
+
+# edge_node.py + tts_server.py — live voice paging / WS delivery
+flask-sock
+simple-websocket
+
+# edge_node.py — optional MQTT heartbeat publish (set MQTT_ZONE_ID env var
+# to this node's zone_code to enable; degrades gracefully without it)
+paho-mqtt

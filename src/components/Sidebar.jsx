@@ -4,7 +4,7 @@ import {
   Settings, Lock, LogOut,
   Settings2, Cpu, Network,
   ChevronDown, Volume2, BarChart3, FileText, Activity,
-  Users,
+  Users, CalendarClock, ListChecks,
 } from "lucide-react";
 import { useAuthStore } from "../store/useAuthStore";
 import { EXISTING_ROLE_MAP } from "../pages/audio_alerts/utils/constants";
@@ -38,12 +38,14 @@ const IO_PANEL_IDS = new Set(IO_SUB_ITEMS.map((i) => i.id));
 
 // aa-access removed — User Management is now a top-level nav item
 const AA_SUB_ITEMS = [
-  // { id: "aa-live",      icon: Activity,  label: "Live Monitor",    perm: "aa.live.view" },
-  // { id: "aa-rules",     icon: Sliders,   label: "Rule Builder",    perm: "aa.rules.view" },
+  { id: "aa-live",      icon: Activity,  label: "Live Monitor",    perm: "aa.live.view" },
+  { id: "aa-rules",     icon: Sliders,   label: "Rule Builder",    perm: "aa.rules.view" },
+  { id: "aa-schedule",  icon: CalendarClock, label: "Schedule",    perm: "aa.schedule.view" },
+  { id: "aa-sop",       icon: ListChecks, label: "SOP Guidance",  perm: "aa.sop.view" },
   { id: "aa-audio",     icon: Volume2,   label: "Audio Config",    perm: "aa.audio.upload" },
   { id: "aa-devices",   icon: Cpu,       label: "Devices & Zones", perm: "aa.devices.view" },
-  // { id: "aa-analytics", icon: BarChart3, label: "Analytics",       perm: "aa.analytics.view" },
-  // { id: "aa-logs",      icon: FileText,  label: "Logs",    perm: "aa.logs.view" },
+  { id: "aa-analytics", icon: BarChart3, label: "Analytics",       perm: "aa.analytics.view" },
+  { id: "aa-logs",      icon: FileText,  label: "Logs",    perm: "aa.logs.view" },
   { id: "aa-settings",  icon: Settings2, label: "App Settings",    perm: "aa.users.manage" },
 ];
 

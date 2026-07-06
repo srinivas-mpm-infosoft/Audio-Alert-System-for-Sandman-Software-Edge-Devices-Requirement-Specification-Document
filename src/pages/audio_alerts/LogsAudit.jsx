@@ -1,16 +1,32 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Download, Loader2, FileText, ShieldCheck, X, ChevronUp, ChevronDown, Search, RefreshCw, AlertTriangle } from "lucide-react";
+import { Download, Loader2, FileText, ShieldCheck, X, ChevronUp, ChevronDown, Search, RefreshCw, AlertTriangle, History } from "lucide-react";
 import { useAuditLog } from "./hooks/useAuditLog";
 import { useCan } from "./hooks/useCan";
+import { getAnnouncementHistory } from "./api/logs.api";
 import PriorityBadge from "./components/PriorityBadge";
 import EmptyState from "./components/EmptyState";
 import { PRIORITIES } from "./utils/constants";
 import { formatTimestamp } from "./utils/formatters";
 
 const TABS = [
+  { id: "announcements", label: "Announcement History", icon: History },
   { id: "alert-logs", label: "Alert Logs",  icon: FileText },
   // { id: "audit",      label: "Audit Log",   icon: ShieldCheck },
 ];
+
+const ANNOUNCEMENT_TYPE_LABEL = {
+  broadcast: "Manual Broadcast",
+  scheduled: "Scheduled",
+  paging:    "Live Paging",
+  sop:       "SOP Step",
+};
+
+const ANNOUNCEMENT_TYPE_COLOR = {
+  broadcast: "bg-indigo-100 text-indigo-700",
+  scheduled: "bg-blue-100 text-blue-700",
+  paging:    "bg-purple-100 text-purple-700",
+  sop:       "bg-teal-100 text-teal-700",
+};
 
 const ACTION_COLORS = {
   "ack":           "bg-emerald-100 text-emerald-700",
@@ -93,7 +109,16 @@ function SortHeader({ label, sortKey, sortState, onSort }) {
 }
 
 export default function LogsAudit() {
-  const [activeTab, setActiveTab] = useState("alert-logs");
+  const [activeTab, setActiveTab] = useState("announcements");
+
+  // Announcement history filters
+  const [annItems, setAnnItems] = useState([]);
+  const [annTotal, setAnnTotal] = useState(0);
+  const [annPage, setAnnPage] = useState(1);
+  const [annType, setAnnType] = useState("");
+  const [annZone, setAnnZone] = useState("");
+  const [annLoading, setAnnLoading] = useState(false);
+  const [annError, setAnnError] = useState(null);
 
   // Alert log filters
   const [search, setSearch]           = useState("");
@@ -118,6 +143,28 @@ export default function LogsAudit() {
   } = useAuditLog();
 
   const PAGE_SIZE = 20;
+
+  const loadAnnouncements = useCallback(async () => {
+    setAnnLoading(true);
+    setAnnError(null);
+    try {
+      const res = await getAnnouncementHistory(
+        { type: annType, zone: annZone }, annPage, PAGE_SIZE,
+      );
+      if (res.ok) { setAnnItems(res.data.items); setAnnTotal(res.data.total); }
+      else setAnnError(res.error || "Failed to load announcement history");
+    } catch {
+      setAnnError("Network error");
+    } finally {
+      setAnnLoading(false);
+    }
+  }, [annType, annZone, annPage]);
+
+  useEffect(() => {
+    if (activeTab === "announcements") loadAnnouncements();
+  }, [activeTab, loadAnnouncements]);
+
+  const annPages = Math.max(1, Math.ceil(annTotal / PAGE_SIZE));
 
   const buildAlertFilters = useCallback(() => ({
     ...(search       ? { search }             : {}),
@@ -177,6 +224,105 @@ export default function LogsAudit() {
             );
           })}
         </div>
+
+        {/* ── Announcement History (D1) ───────────────────────────── */}
+        {activeTab === "announcements" && (
+          <div className="p-4 flex flex-col gap-4">
+            <div className="flex flex-wrap gap-2 items-center justify-between">
+              <div className="flex gap-2 flex-wrap items-center">
+                <select
+                  value={annType}
+                  onChange={(e) => { setAnnType(e.target.value); setAnnPage(1); }}
+                  className="border border-slate-200 rounded-lg px-2 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-indigo-400 text-slate-600"
+                >
+                  <option value="">All types</option>
+                  <option value="broadcast">Manual Broadcast</option>
+                  <option value="scheduled">Scheduled</option>
+                  <option value="paging">Live Paging</option>
+                  <option value="sop">SOP Step</option>
+                </select>
+                <input
+                  className="border border-slate-200 rounded-lg px-2 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-indigo-400 w-36 text-slate-600"
+                  placeholder="Filter by zone…"
+                  value={annZone}
+                  onChange={(e) => { setAnnZone(e.target.value); setAnnPage(1); }}
+                />
+                <button type="button"
+                  onClick={() => { setAnnType(""); setAnnZone(""); setAnnPage(1); }}
+                  className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 transition-colors" title="Clear filters">
+                  <X size={13} />
+                </button>
+                <button type="button" onClick={loadAnnouncements}
+                  className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 transition-colors" title="Refresh">
+                  <RefreshCw size={13} />
+                </button>
+              </div>
+              {canExport && (
+                <button type="button" onClick={() => exportCSV(annItems, "announcement-history.csv")}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 border border-slate-200 rounded-lg text-xs text-slate-500 hover:bg-slate-50">
+                  <Download size={13} /> Export CSV
+                </button>
+              )}
+            </div>
+
+            {annLoading ? (
+              <div className="flex justify-center py-12"><Loader2 className="h-7 w-7 animate-spin text-indigo-600" /></div>
+            ) : annError ? (
+              <EmptyState title="Could not load announcement history" message={annError} />
+            ) : annItems.length === 0 ? (
+              <EmptyState title="No announcements yet" message="Manual broadcasts, scheduled announcements, live paging sessions, and SOP steps will appear here." />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm" role="table">
+                  <thead>
+                    <tr className="border-b border-slate-100 bg-slate-50/60">
+                      {["Timestamp", "Type", "Target", "Audio Mode", "Language", "Status", "Source"].map((h) => (
+                        <th key={h} className="px-3 py-3 text-left font-semibold text-slate-600 text-[10px] uppercase tracking-wide whitespace-nowrap">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-50">
+                    {annItems.map((row, idx) => (
+                      <tr key={idx} className="hover:bg-indigo-50/20 transition-colors">
+                        <td className="px-3 py-3 font-mono text-[11px] text-slate-500 whitespace-nowrap">
+                          {row.timestamp ? formatTimestamp(row.timestamp) : "—"}
+                        </td>
+                        <td className="px-3 py-3">
+                          <span className={`inline-block text-[10px] font-bold px-2 py-0.5 rounded-full ${ANNOUNCEMENT_TYPE_COLOR[row.type] ?? "bg-slate-100 text-slate-600"}`}>
+                            {ANNOUNCEMENT_TYPE_LABEL[row.type] ?? row.type}
+                          </span>
+                        </td>
+                        <td className="px-3 py-3 text-xs text-slate-700 max-w-[160px]">
+                          <span className="block truncate" title={row.target}>{row.target || "—"}</span>
+                        </td>
+                        <td className="px-3 py-3 text-xs text-slate-500 capitalize">{row.audio_mode?.replace("_", " ") || "—"}</td>
+                        <td className="px-3 py-3 text-xs text-slate-500">{row.language || "—"}</td>
+                        <td className="px-3 py-3">
+                          <span className={`inline-block text-[10px] font-bold px-2 py-0.5 rounded-full ${DELIVERY_COLORS[(row.status || "").toLowerCase()] ?? "bg-slate-100 text-slate-600"}`}>
+                            {row.status}
+                          </span>
+                        </td>
+                        <td className="px-3 py-3 text-[11px] text-slate-400">{row.source || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {annPages > 1 && (
+              <div className="flex items-center justify-between text-xs text-slate-500 pt-2">
+                <span>Page {annPage} of {annPages} ({annTotal} total)</span>
+                <div className="flex gap-1">
+                  <button type="button" disabled={annPage === 1} onClick={() => setAnnPage((p) => p - 1)}
+                    className="px-3 py-1.5 border border-slate-200 rounded-lg disabled:opacity-40 hover:bg-slate-50">Prev</button>
+                  <button type="button" disabled={annPage === annPages} onClick={() => setAnnPage((p) => p + 1)}
+                    className="px-3 py-1.5 border border-slate-200 rounded-lg disabled:opacity-40 hover:bg-slate-50">Next</button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* ── Alert Logs ───────────────────────────────────────────── */}
         {activeTab === "alert-logs" && (

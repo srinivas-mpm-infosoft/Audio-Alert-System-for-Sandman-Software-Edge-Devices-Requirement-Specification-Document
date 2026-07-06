@@ -15,13 +15,16 @@ All audio-alerts data now lives in MariaDB. See schema.sql for DDL.
 import json
 import os
 import uuid
+import hashlib
 import bcrypt
 import logging
 import socket
 import subprocess
+import threading
 import time
 import urllib.request
 import urllib.error
+import requests
 from datetime import datetime, timedelta
 from pathlib import Path
 from decimal import Decimal
@@ -34,6 +37,17 @@ from sqlalchemy import (
     ForeignKey, Enum, Numeric, SmallInteger,
 )
 from sqlalchemy.orm import relationship
+
+import websocket as ws_client
+from flask_sock import Sock
+from simple_websocket import ConnectionClosed
+
+import dispatch_service
+import heartbeat_service
+import mqtt_service
+import scheduler_service
+import sop_service
+import events_bus
 
 
 # ============================================================
@@ -69,15 +83,18 @@ ALL_PERMISSIONS = [
     "aa.logs.view", "aa.logs.export", "aa.logs.delete",
     "aa.audit.view",
     "aa.users.manage", "aa.security.manage",
+    "aa.schedule.view", "aa.schedule.edit",
+    "aa.paging.use",
+    "aa.sop.view", "aa.sop.edit", "aa.sop.delete", "aa.sop.run", "aa.sop.ack",
 ]
 DEFAULT_ROLE_PERMISSIONS = {
     "administrator":          list(ALL_PERMISSIONS),
     "plant_manager":          [p for p in ALL_PERMISSIONS if p not in ("aa.users.manage", "aa.security.manage")],
-    "process_engineer":       ["aa.live.view","aa.alerts.ack","aa.broadcast.manual","aa.rules.view","aa.rules.edit","aa.audio.upload","aa.devices.view","aa.analytics.view","aa.analytics.export","aa.logs.view","aa.logs.export"],
-    "shift_supervisor":       ["aa.live.view","aa.alerts.ack","aa.broadcast.manual","aa.rules.view","aa.devices.view","aa.analytics.view","aa.logs.view"],
-    "operator":               ["aa.live.view","aa.alerts.ack","aa.analytics.view","aa.logs.view"],
-    "maintenance_technician": ["aa.live.view","aa.devices.view","aa.devices.edit","aa.analytics.view","aa.logs.view"],
-    "auditor":                ["aa.live.view","aa.analytics.view","aa.logs.view","aa.audit.view"],
+    "process_engineer":       ["aa.live.view","aa.alerts.ack","aa.broadcast.manual","aa.rules.view","aa.rules.edit","aa.audio.upload","aa.devices.view","aa.analytics.view","aa.analytics.export","aa.logs.view","aa.logs.export","aa.schedule.view","aa.schedule.edit","aa.paging.use","aa.sop.view","aa.sop.edit","aa.sop.delete","aa.sop.run","aa.sop.ack"],
+    "shift_supervisor":       ["aa.live.view","aa.alerts.ack","aa.broadcast.manual","aa.rules.view","aa.devices.view","aa.analytics.view","aa.logs.view","aa.schedule.view","aa.paging.use","aa.sop.view","aa.sop.run","aa.sop.ack"],
+    "operator":               ["aa.live.view","aa.alerts.ack","aa.analytics.view","aa.logs.view","aa.sop.view","aa.sop.run","aa.sop.ack"],
+    "maintenance_technician": ["aa.live.view","aa.devices.view","aa.devices.edit","aa.analytics.view","aa.logs.view","aa.sop.view"],
+    "auditor":                ["aa.live.view","aa.analytics.view","aa.logs.view","aa.audit.view","aa.sop.view"],
 }
 
 # Static catalogues (these never change at runtime — kept in code)
@@ -181,7 +198,8 @@ DEFAULT_SYSTEM_CONFIG = {
     "cors_origins": [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-        "http://localhost:5174"
+        "http://localhost:5174",
+        "http://10.42.0.1:5173"
     ],
     "gpio_pins": {
         "Digital Output 1": 24,
@@ -199,6 +217,14 @@ DEFAULT_SYSTEM_CONFIG = {
         "Morning":   {"start": "06:00", "end": "14:00"},
         "Afternoon": {"start": "14:00", "end": "22:00"},
         "Night":     {"start": "22:00", "end": "06:00"},
+    },
+    "services": {
+        "tts_server_url":  "http://localhost:6000",
+        "edge_node_port":  5000,
+        "heartbeat_interval_sec": 20,
+        "heartbeat_offline_after_sec": 60,
+        "mqtt_broker_host": "localhost",
+        "mqtt_broker_port": 1883,
     },
 }
 
@@ -227,9 +253,10 @@ def _write_sc(cfg: dict):
 if not SYSTEM_CONFIG_FILE.exists():
     _write_sc(DEFAULT_SYSTEM_CONFIG)
 
-_startup_sc = _read_sc()
-_app_cfg    = _startup_sc.get("app",      DEFAULT_SYSTEM_CONFIG["app"])
-_db_cfg     = _startup_sc.get("database", DEFAULT_SYSTEM_CONFIG["database"])
+_startup_sc  = _read_sc()
+_app_cfg     = _startup_sc.get("app",      DEFAULT_SYSTEM_CONFIG["app"])
+_db_cfg      = _startup_sc.get("database", DEFAULT_SYSTEM_CONFIG["database"])
+_svc_cfg     = _startup_sc.get("services", DEFAULT_SYSTEM_CONFIG["services"])
 
 # Initialise legacy config-files (untouched logic from original)
 for _f, _d in {
@@ -245,6 +272,7 @@ for _f, _d in {
 # ============================================================
 
 app = Flask(__name__, static_folder=str(STATIC), static_url_path="/static")
+sock = Sock(app)
 
 app.secret_key = "X7f1m+oJ6q8wR2t9UeY3pF4zN0hKd1sQjM5aV8bZc2xT7nL0oR5vH3gC6dP9yW4k"
 app.config.update(
@@ -468,6 +496,8 @@ class Device(db.Model):
             "uptime_pct":    meta.get("uptime_pct", 100.0),
             "downtime_min":  meta.get("downtime_min", 0),
             "metrics":       meta.get("metrics", {"cpu":0,"memory":0,"latency_ms":0,"audio_queue":0}),
+            "health":            meta.get("health"),
+            "health_updated_at": meta.get("health_updated_at"),
             "protocol":      meta.get("protocol"),
             "mqtt_topic":    meta.get("mqtt_topic"),
             "audio_channel": meta.get("audio_channel"),
@@ -548,6 +578,7 @@ class AudioClip(db.Model):
     file_size      = Column(Integer)
     format         = Column(String(16))
     file_path      = Column(String(512))
+    file_hash      = Column(String(64))
     description    = Column(Text)
     uploaded_by    = Column(String(64))
     upload_date    = Column(DateTime, default=datetime.now)
@@ -776,6 +807,234 @@ class AlertEvent(db.Model):
                 None
             ),
             "snapshot":         snap,
+        }
+
+
+class ScheduledAnnouncement(db.Model):
+    __tablename__ = "scheduled_announcements"
+    id               = Column(Integer, primary_key=True)
+    schedule_code    = Column(String(32), unique=True, nullable=False)
+    name             = Column(String(255), nullable=False)
+    message          = Column(Text)
+    clip_id          = Column(Integer, ForeignKey("audio_clips.id", ondelete="SET NULL"))
+    language         = Column(String(8), default="EN")
+    zone_ids         = Column(JSON)             # list of zone_code strings
+    plant_wide       = Column(Boolean, default=False)
+    schedule_type    = Column(String(16), default="once")   # once | daily | weekly
+    scheduled_at     = Column(DateTime)                       # for "once"
+    days_of_week     = Column(JSON)                           # for "weekly": [0..6], Mon=0
+    time_of_day      = Column(String(8))                      # "HH:MM" for daily/weekly
+    is_enabled       = Column(Boolean, default=True)
+    next_run_at      = Column(DateTime)
+    last_run_at      = Column(DateTime)
+    last_run_status  = Column(String(16))                     # success | partial | failed
+    created_by       = Column(String(64))
+    created_at       = Column(DateTime, default=datetime.now)
+    updated_at       = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    clip = relationship("AudioClip", foreign_keys=[clip_id])
+
+    def to_dict(self):
+        return {
+            "id":              self.schedule_code,
+            "db_id":           self.id,
+            "name":            self.name,
+            "message":         self.message,
+            "clip_id":         self.clip.clip_code if self.clip else None,
+            "language":        self.language or "EN",
+            "zone_ids":        self.zone_ids or [],
+            "plant_wide":      bool(self.plant_wide),
+            "schedule_type":   self.schedule_type,
+            "scheduled_at":    self.scheduled_at.isoformat() if self.scheduled_at else None,
+            "days_of_week":    self.days_of_week or [],
+            "time_of_day":     self.time_of_day,
+            "is_enabled":      bool(self.is_enabled),
+            "next_run_at":     self.next_run_at.isoformat() if self.next_run_at else None,
+            "last_run_at":     self.last_run_at.isoformat() if self.last_run_at else None,
+            "last_run_status": self.last_run_status,
+            "created_by":      self.created_by,
+            "created_at":      self.created_at.isoformat() if self.created_at else None,
+            "updated_at":      self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class PagingSession(db.Model):
+    __tablename__ = "paging_sessions"
+    id           = Column(Integer, primary_key=True)
+    session_code = Column(String(32), unique=True, nullable=False)
+    operator     = Column(String(64), nullable=False)
+    zone_ids     = Column(JSON)             # list of zone_code strings targeted
+    plant_wide   = Column(Boolean, default=False)
+    device_ips   = Column(JSON)             # devices actually connected
+    status       = Column(String(16), default="active")   # active | completed | error
+    error        = Column(Text)
+    started_at   = Column(DateTime, default=datetime.now)
+    ended_at     = Column(DateTime)
+
+    def to_dict(self):
+        return {
+            "id":          self.session_code,
+            "db_id":       self.id,
+            "operator":    self.operator,
+            "zone_ids":    self.zone_ids or [],
+            "plant_wide":  bool(self.plant_wide),
+            "device_ips":  self.device_ips or [],
+            "status":      self.status,
+            "error":       self.error,
+            "started_at":  self.started_at.isoformat() if self.started_at else None,
+            "ended_at":    self.ended_at.isoformat() if self.ended_at else None,
+            "duration_sec": (self.ended_at - self.started_at).total_seconds() if (self.ended_at and self.started_at) else None,
+        }
+
+
+# ============================================================
+# SOP Step-by-Step Audio Guidance (D4)
+# ============================================================
+
+class Sop(db.Model):
+    __tablename__ = "sops"
+    id              = Column(Integer, primary_key=True)
+    sop_code        = Column(String(32), unique=True, nullable=False)
+    name            = Column(String(255), nullable=False)
+    description     = Column(Text)
+    zone_ids        = Column(JSON)               # list of zone_code strings
+    plant_wide      = Column(Boolean, default=False)
+    ack_timeout_sec = Column(Integer, default=120)
+    is_active       = Column(Boolean, default=True)
+    created_by      = Column(String(64))
+    created_at      = Column(DateTime, default=datetime.now)
+    updated_at      = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    steps = relationship("SopStep", backref="sop", cascade="all, delete-orphan",
+                         order_by="SopStep.seq", lazy="joined")
+
+    def to_dict(self, include_steps=True):
+        d = {
+            "id":              self.sop_code,
+            "db_id":           self.id,
+            "name":            self.name,
+            "description":     self.description,
+            "zone_ids":        self.zone_ids or [],
+            "plant_wide":      bool(self.plant_wide),
+            "ack_timeout_sec": self.ack_timeout_sec,
+            "is_active":       bool(self.is_active),
+            "step_count":      len(self.steps),
+            "created_by":      self.created_by,
+            "created_at":      self.created_at.isoformat() if self.created_at else None,
+            "updated_at":      self.updated_at.isoformat() if self.updated_at else None,
+        }
+        if include_steps:
+            d["steps"] = [s.to_dict() for s in self.steps]
+        return d
+
+
+class SopStep(db.Model):
+    __tablename__ = "sop_steps"
+    id         = Column(Integer, primary_key=True)
+    sop_id     = Column(Integer, ForeignKey("sops.id", ondelete="CASCADE"), nullable=False)
+    seq        = Column(Integer, default=0)
+    title      = Column(String(255), nullable=False)
+    audio_mode = Column(String(16), default="text")     # text | clip
+    message    = Column(Text)
+    clip_id    = Column(Integer, ForeignKey("audio_clips.id", ondelete="SET NULL"))
+    language   = Column(String(8), default="EN")
+
+    clip = relationship("AudioClip", foreign_keys=[clip_id])
+
+    def to_dict(self):
+        return {
+            "id":         self.id,
+            "seq":        self.seq or 0,
+            "title":      self.title,
+            "audio_mode": self.audio_mode,
+            "message":    self.message,
+            "clip_id":    self.clip.clip_code if self.clip else None,
+            "language":   self.language or "EN",
+        }
+
+
+class SopExecution(db.Model):
+    __tablename__ = "sop_executions"
+    id                  = Column(BigInteger, primary_key=True)
+    execution_code      = Column(String(32), unique=True, nullable=False)
+    sop_id              = Column(Integer, ForeignKey("sops.id", ondelete="CASCADE"), nullable=False)
+    sop_name            = Column(String(255))
+    status              = Column(String(24), default="NOT_STARTED")
+    # NOT_STARTED | PLAYING_STEP | WAITING_FOR_ACKNOWLEDGEMENT | COMPLETED | CANCELLED | FAILED
+    current_step_index  = Column(Integer, default=0)
+    retry_count         = Column(Integer, default=0)
+    zone_ids            = Column(JSON)
+    plant_wide          = Column(Boolean, default=False)
+    started_by          = Column(String(64))
+    started_at          = Column(DateTime, default=datetime.now)
+    step_started_at     = Column(DateTime)     # when the current step began waiting for ack
+    completed_at        = Column(DateTime)
+    error               = Column(Text)
+
+    sop = relationship("Sop", foreign_keys=[sop_id])
+
+    def to_dict(self):
+        total_steps  = len(self.sop.steps) if self.sop else 0
+        current_step = None
+        if self.sop and 0 <= self.current_step_index < len(self.sop.steps):
+            current_step = self.sop.steps[self.current_step_index].to_dict()
+        waited_sec = None
+        if self.status == "WAITING_FOR_ACKNOWLEDGEMENT" and self.step_started_at:
+            waited_sec = (datetime.now() - self.step_started_at).total_seconds()
+        return {
+            "id":                  self.execution_code,
+            "db_id":               self.id,
+            "sop_id":              self.sop.sop_code if self.sop else None,
+            "sop_name":            self.sop_name,
+            "status":              self.status,
+            "current_step_index":  self.current_step_index,
+            "current_step_number": self.current_step_index + 1,
+            "total_steps":         total_steps,
+            "current_step":        current_step,
+            "retry_count":         self.retry_count or 0,
+            "zone_ids":            self.zone_ids or [],
+            "plant_wide":          bool(self.plant_wide),
+            "started_by":          self.started_by,
+            "started_at":          self.started_at.isoformat() if self.started_at else None,
+            "step_started_at":     self.step_started_at.isoformat() if self.step_started_at else None,
+            "waited_sec":          round(waited_sec, 1) if waited_sec is not None else None,
+            "ack_timeout_sec":     self.sop.ack_timeout_sec if self.sop else None,
+            "completed_at":        self.completed_at.isoformat() if self.completed_at else None,
+            "error":               self.error,
+        }
+
+
+class SopStepExecution(db.Model):
+    """Full audit trail — one row per step event (played / acknowledged /
+    timeout-replay / completed / cancelled / failed)."""
+    __tablename__ = "sop_step_executions"
+    id           = Column(BigInteger, primary_key=True)
+    execution_id = Column(Integer, ForeignKey("sop_executions.id", ondelete="CASCADE"), nullable=False)
+    sop_id       = Column(Integer)
+    step_id      = Column(Integer)
+    step_number  = Column(Integer)
+    event_type   = Column(String(32))     # played | acknowledged | timeout_replay | completed | cancelled | failed
+    audio_mode   = Column(String(16))
+    zone_code    = Column(String(64))
+    language     = Column(String(8))
+    operator     = Column(String(64))
+    retry_count  = Column(Integer, default=0)
+    created_at   = Column(DateTime, default=datetime.now)
+
+    def to_dict(self):
+        return {
+            "id":           self.id,
+            "execution_id": self.execution_id,
+            "sop_id":       self.sop_id,
+            "step_id":      self.step_id,
+            "step_number":  self.step_number,
+            "event_type":   self.event_type,
+            "audio_mode":   self.audio_mode,
+            "zone_code":    self.zone_code,
+            "language":     self.language,
+            "operator":     self.operator,
+            "retry_count":  self.retry_count or 0,
+            "created_at":   self.created_at.isoformat() if self.created_at else None,
         }
 
 
@@ -2074,36 +2333,616 @@ def aa_broadcast():
         return jsonify(ok=False, error="Permission denied"), 403
     data     = request.json or {}
     zone_ids = data.get("zone_ids", [])
-    z_db_id  = None
-    z_name   = data.get("zone", "")
-    if zone_ids:
-        z = Zone.query.filter_by(zone_code=zone_ids[0]).first()
-        if z:
-            z_db_id = z.id
-            z_name  = z.name
-    # Create a "broadcast" alert_event row using a placeholder rule (id=0 won't satisfy FK).
-    # We allow broadcasts as a separate concept — return synthesized object.
-    snapshot = {
-        "message":    data.get("message", "Manual broadcast"),
-        "language":   data.get("language", "EN"),
-        "audio_type": data.get("audio_type", "voice"),
-        "clip_id":    data.get("clip_id"),
-        "plant":      data.get("plant", ""),
-        "line":       data.get("line", ""),
-    }
-    fake = {
+    message  = (data.get("message") or "").strip() or None
+    clip_id  = data.get("clip_id")
+    language = data.get("language", "EN")
+
+    if not zone_ids:
+        return jsonify(ok=False, error="At least one zone is required"), 400
+    if not message and not clip_id:
+        return jsonify(ok=False, error="Either a message or a clip_id is required"), 400
+
+    clip_path = None
+    if clip_id:
+        clip = AudioClip.query.filter_by(clip_code=clip_id).first()
+        if not clip or not clip.file_path:
+            return jsonify(ok=False, error="Clip not found or has no audio file"), 404
+        clip_path = clip.file_path
+
+    receipts = dispatch_service.dispatch_broadcast(
+        zone_ids, message=message, clip_path=clip_path, language=language,
+        alert_category=data.get("priority", "Normal"), alert_source="Manual Broadcast",
+    )
+    delivered = sum(1 for r in receipts if r.get("edge_delivered"))
+
+    _add_audit("broadcast.manual", "broadcast", "Manual Broadcast",
+              after={**data, "delivered": delivered, "targeted": len(receipts)})
+
+    return jsonify(ok=True, data={
         "alert_id":   str(uuid.uuid4()),
-        "priority":   "MEDIUM",
-        "alert_code": "BROADCAST",
-        "zone":       z_name,
-        "zone_id":    zone_ids[0] if zone_ids else "",
+        "zone_ids":   zone_ids,
+        "message":    message,
+        "clip_id":    clip_id,
+        "language":   language,
         "timestamp":  datetime.now().isoformat(),
-        "status":     "Active",
-        "playback_status": "queued",
-        **snapshot,
-    }
-    _add_audit("broadcast.manual", "broadcast", "Manual Broadcast", after=data)
-    return jsonify(ok=True, data=fake)
+        "targeted":   len(receipts),
+        "delivered":  delivered,
+        "receipts":   receipts,
+    })
+
+
+# ============================================================
+# AUDIO ALERTS — Live Voice Paging (D2)
+# ============================================================
+#
+# Browser mic (MediaRecorder, ~250ms chunks) -> this WS relay -> one outbound
+# WS connection per target edge node -> edge_node.py's /paging/ws, which
+# pipes the stream live into ffmpeg for near-real-time playback. This relay
+# does no decoding itself — it just fans out each binary chunk it receives.
+# No translation/TTS anywhere in this path, and no repeated HTTP uploads —
+# the voice stream itself only ever travels over these two WebSockets.
+
+_paging_lock = threading.Lock()
+_active_paging_users = set()   # operator usernames currently holding a PTT session
+
+
+@sock.route("/audio-alerts/paging/ws")
+def aa_paging_ws(ws):
+    if "user" not in session:
+        ws.close(reason=1008, message="Unauthorized")
+        return
+    if not _can("aa.paging.use"):
+        ws.close(reason=1008, message="Permission denied")
+        return
+
+    user = _current_user().get("username", "unknown")
+
+    with _paging_lock:
+        if user in _active_paging_users:
+            ws.send(json.dumps({"type": "error", "code": "already_active",
+                                "message": "You already have an active paging session"}))
+            ws.close(reason=1008, message="Session already active for this operator")
+            return
+        _active_paging_users.add(user)
+
+    device_conns = {}   # device_ip -> websocket-client connection
+    paging_session = None
+
+    def _close_all():
+        for ip, conn in device_conns.items():
+            try: conn.close()
+            except Exception: pass
+        device_conns.clear()
+
+    try:
+        init_raw = ws.receive(timeout=10)
+        if init_raw is None:
+            return
+        try:
+            init = json.loads(init_raw)
+        except Exception:
+            ws.close(reason=1003, message="First message must be JSON target selection")
+            return
+
+        zone_ids   = init.get("zone_ids") or []
+        plant_wide = bool(init.get("plant_wide"))
+        zone_codes = dispatch_service.all_zone_codes() if plant_wide else zone_ids
+        targets    = dispatch_service.resolve_targets(zone_codes)
+        edge_port  = _svc_cfg.get("edge_node_port", 5000)
+
+        for t in targets:
+            ip = t.get("device_ip")
+            if not ip:
+                continue
+            try:
+                conn = ws_client.create_connection(f"ws://{ip}:{edge_port}/paging/ws", timeout=5)
+                device_conns[ip] = conn
+            except Exception as e:
+                log.warning("[Paging] Could not connect to edge node %s: %s", ip, e)
+
+        paging_session = PagingSession(
+            session_code=f"page-{uuid.uuid4().hex[:10]}", operator=user,
+            zone_ids=zone_codes, plant_wide=plant_wide,
+            device_ips=list(device_conns.keys()), status="active",
+        )
+        db.session.add(paging_session)
+        db.session.commit()
+
+        _add_audit("paging.start", "paging", "Live Voice Paging",
+                  after={"user": user, "zones": zone_codes, "devices": list(device_conns.keys())})
+        events_bus.publish({
+            "type": "paging_session", "event": "start", "operator": user,
+            "zones": zone_codes, "plant_wide": plant_wide,
+            "devices": list(device_conns.keys()), "timestamp": datetime.now().isoformat(),
+        })
+        log.info("[Paging] %s started paging to %d/%d device(s)",
+                user, len(device_conns), len(targets))
+
+        if not device_conns:
+            ws.send(json.dumps({"type": "error", "code": "no_devices",
+                                "message": "No reachable devices in target zone(s)"}))
+            paging_session.status = "error"
+            paging_session.error = "No reachable devices"
+            paging_session.ended_at = datetime.now()
+            db.session.commit()
+            return
+
+        ws.send(json.dumps({"type": "ready", "devices": len(device_conns)}))
+
+        while True:
+            try:
+                data = ws.receive(timeout=30)
+            except ConnectionClosed:
+                break
+            if data is None:
+                break
+            if isinstance(data, (bytes, bytearray)):
+                dead = []
+                for ip, conn in device_conns.items():
+                    try:
+                        conn.send_binary(bytes(data))
+                    except Exception:
+                        dead.append(ip)
+                for ip in dead:
+                    device_conns.pop(ip, None)
+                    # Node disconnection handled gracefully — tell the operator
+                    # rather than silently paging into a dead connection.
+                    try:
+                        ws.send(json.dumps({"type": "device_disconnected", "device_ip": ip,
+                                            "remaining": len(device_conns)}))
+                    except Exception:
+                        pass
+                    if not device_conns:
+                        try:
+                            ws.send(json.dumps({"type": "error", "code": "all_devices_lost",
+                                                "message": "All target devices disconnected"}))
+                        except Exception:
+                            pass
+                        break
+            # ignore text control frames other than the initial JSON message
+    except Exception as e:
+        log.error("[Paging] Session error: %s", e)
+        if paging_session:
+            paging_session.status = "error"
+            paging_session.error = str(e)[:500]
+    finally:
+        _close_all()
+        with _paging_lock:
+            _active_paging_users.discard(user)
+        if paging_session:
+            if paging_session.status == "active":
+                paging_session.status = "completed"
+            paging_session.ended_at = datetime.now()
+            try:
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+        _add_audit("paging.stop", "paging", "Live Voice Paging", after={"user": user})
+        events_bus.publish({
+            "type": "paging_session", "event": "stop", "operator": user,
+            "timestamp": datetime.now().isoformat(),
+        })
+        log.info("[Paging] %s ended paging session", user)
+
+
+@app.route("/audio-alerts/paging/sessions", methods=["GET"])
+def aa_paging_sessions():
+    err = _require_login()
+    if err: return err
+    if not _can("aa.logs.view"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    limit = max(1, min(200, int(request.args.get("limit", 50))))
+    rows = PagingSession.query.order_by(PagingSession.started_at.desc()).limit(limit).all()
+    return jsonify(ok=True, data=[r.to_dict() for r in rows])
+
+
+# ============================================================
+# AUDIO ALERTS — Real-time dashboard events (D1 / tech requirements)
+# ============================================================
+#
+# Generic fan-out channel: any backend service (heartbeat_service for device
+# status, dispatch_service for announcements, sop_service for execution
+# state) calls events_bus.publish(event) and every connected dashboard
+# browser receives it immediately — satisfies "real-time zone status /
+# announcement / SOP updates without a full page refresh" without forcing
+# each feature through its own bespoke channel.
+
+@sock.route("/audio-alerts/dashboard/ws")
+def aa_dashboard_ws(ws):
+    if "user" not in session:
+        ws.close(reason=1008, message="Unauthorized")
+        return
+
+    def _on_event(event):
+        try:
+            ws.send(json.dumps(event))
+        except Exception:
+            pass
+
+    events_bus.subscribe(_on_event)
+    try:
+        ws.send(json.dumps({"type": "connected"}))
+        while True:
+            try:
+                msg = ws.receive(timeout=30)
+            except ConnectionClosed:
+                break
+            if msg is None:
+                break
+            # No client->server messages expected; connection is receive-only
+            # from the browser's point of view (keepalive pings are fine to ignore).
+    except Exception as e:
+        log.warning("[Dashboard WS] session error: %s", e)
+    finally:
+        events_bus.unsubscribe(_on_event)
+
+
+# ============================================================
+# AUDIO ALERTS — Scheduled Announcements (D5)
+# ============================================================
+
+def _next_schedule_code():
+    last = ScheduledAnnouncement.query.order_by(ScheduledAnnouncement.id.desc()).first()
+    n = (last.id + 1) if last else 1
+    return f"sched-{n:03d}"
+
+
+@app.route("/audio-alerts/schedules", methods=["GET"])
+def aa_schedules_get():
+    err = _require_login()
+    if err: return err
+    if not _can("aa.schedule.view"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    rows = ScheduledAnnouncement.query.order_by(ScheduledAnnouncement.created_at.desc()).all()
+    return jsonify(ok=True, data=[r.to_dict() for r in rows])
+
+
+def _apply_schedule_fields(sched, data):
+    if "name" in data: sched.name = data["name"]
+    if "message" in data: sched.message = data["message"]
+    if "language" in data: sched.language = data["language"]
+    if "zone_ids" in data: sched.zone_ids = data["zone_ids"] or []
+    if "plant_wide" in data: sched.plant_wide = bool(data["plant_wide"])
+    if "schedule_type" in data: sched.schedule_type = data["schedule_type"]
+    if "days_of_week" in data: sched.days_of_week = data["days_of_week"] or []
+    if "time_of_day" in data: sched.time_of_day = data["time_of_day"]
+    if "is_enabled" in data: sched.is_enabled = bool(data["is_enabled"])
+    if "scheduled_at" in data and data["scheduled_at"]:
+        sched.scheduled_at = datetime.fromisoformat(data["scheduled_at"])
+    if "clip_id" in data:
+        clip = AudioClip.query.filter_by(clip_code=data["clip_id"]).first() if data["clip_id"] else None
+        sched.clip_id = clip.id if clip else None
+
+
+@app.route("/audio-alerts/schedules", methods=["POST"])
+def aa_schedules_post():
+    err = _require_login()
+    if err: return err
+    if not _can("aa.schedule.edit"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    data = request.json or {}
+    if not data.get("name"):
+        return jsonify(ok=False, error="Name is required"), 400
+    if not data.get("message") and not data.get("clip_id"):
+        return jsonify(ok=False, error="Either a message or a clip_id is required"), 400
+    if not data.get("zone_ids") and not data.get("plant_wide"):
+        return jsonify(ok=False, error="Select target zone(s) or plant-wide"), 400
+
+    sched = ScheduledAnnouncement(
+        schedule_code=_next_schedule_code(),
+        created_by=_current_user().get("username", "unknown"),
+    )
+    _apply_schedule_fields(sched, data)
+    sched.next_run_at = scheduler_service.compute_next_run(
+        sched.schedule_type, sched.scheduled_at, sched.days_of_week, sched.time_of_day,
+    )
+    db.session.add(sched)
+    db.session.commit()
+    if sched.message and not sched.clip_id:
+        dispatch_service.warm_cache_async(sched.message, sched.language or "EN",
+                                          alert_source=f"Schedule cache warm: {sched.name}")
+    _add_audit("schedule.add", f"schedule/{sched.id}", f"Schedule: {sched.name}", after=sched.to_dict())
+    return jsonify(ok=True, data=sched.to_dict()), 201
+
+
+@app.route("/audio-alerts/schedules/<sched_id>", methods=["PUT"])
+def aa_schedules_put(sched_id):
+    err = _require_login()
+    if err: return err
+    if not _can("aa.schedule.edit"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    sched = ScheduledAnnouncement.query.filter_by(schedule_code=sched_id).first()
+    if not sched:
+        return jsonify(ok=False, error="Schedule not found"), 404
+    before = sched.to_dict()
+    data = request.json or {}
+    _apply_schedule_fields(sched, data)
+    sched.next_run_at = scheduler_service.compute_next_run(
+        sched.schedule_type, sched.scheduled_at, sched.days_of_week, sched.time_of_day,
+    )
+    db.session.commit()
+    if sched.message and not sched.clip_id and ("message" in data or "language" in data):
+        dispatch_service.warm_cache_async(sched.message, sched.language or "EN",
+                                          alert_source=f"Schedule cache warm: {sched.name}")
+    _add_audit("schedule.edit", f"schedule/{sched.id}", f"Schedule: {sched.name}",
+              before=before, after=sched.to_dict())
+    return jsonify(ok=True, data=sched.to_dict())
+
+
+@app.route("/audio-alerts/schedules/<sched_id>", methods=["DELETE"])
+def aa_schedules_del(sched_id):
+    err = _require_login()
+    if err: return err
+    if not _can("aa.schedule.edit"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    sched = ScheduledAnnouncement.query.filter_by(schedule_code=sched_id).first()
+    if not sched:
+        return jsonify(ok=False, error="Schedule not found"), 404
+    before = sched.to_dict()
+    db.session.delete(sched)
+    db.session.commit()
+    _add_audit("schedule.remove", f"schedule/{sched_id}", f"Schedule: {before.get('name')}", before=before)
+    return jsonify(ok=True, data={"id": sched_id})
+
+
+@app.route("/audio-alerts/schedules/<sched_id>/enable", methods=["POST"])
+def aa_schedules_enable(sched_id):
+    err = _require_login()
+    if err: return err
+    if not _can("aa.schedule.edit"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    sched = ScheduledAnnouncement.query.filter_by(schedule_code=sched_id).first()
+    if not sched:
+        return jsonify(ok=False, error="Schedule not found"), 404
+    sched.is_enabled = True
+    sched.next_run_at = scheduler_service.compute_next_run(
+        sched.schedule_type, sched.scheduled_at, sched.days_of_week, sched.time_of_day,
+    )
+    db.session.commit()
+    return jsonify(ok=True, data=sched.to_dict())
+
+
+@app.route("/audio-alerts/schedules/<sched_id>/disable", methods=["POST"])
+def aa_schedules_disable(sched_id):
+    err = _require_login()
+    if err: return err
+    if not _can("aa.schedule.edit"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    sched = ScheduledAnnouncement.query.filter_by(schedule_code=sched_id).first()
+    if not sched:
+        return jsonify(ok=False, error="Schedule not found"), 404
+    sched.is_enabled = False
+    db.session.commit()
+    return jsonify(ok=True, data=sched.to_dict())
+
+
+# ============================================================
+# AUDIO ALERTS — SOP Step-by-Step Audio Guidance (D4)
+# ============================================================
+
+def _next_sop_code():
+    last = Sop.query.order_by(Sop.id.desc()).first()
+    n = (last.id + 1) if last else 1
+    return f"sop-{n:03d}"
+
+
+def _apply_sop_fields(sop, data):
+    if "name" in data: sop.name = data["name"]
+    if "description" in data: sop.description = data["description"]
+    if "zone_ids" in data: sop.zone_ids = data["zone_ids"] or []
+    if "plant_wide" in data: sop.plant_wide = bool(data["plant_wide"])
+    if "ack_timeout_sec" in data: sop.ack_timeout_sec = max(5, int(data["ack_timeout_sec"] or 120))
+    if "is_active" in data: sop.is_active = bool(data["is_active"])
+
+    if "steps" in data:
+        for s in list(sop.steps):
+            db.session.delete(s)
+        sop.steps = []
+        for i, step_data in enumerate(data["steps"] or []):
+            clip = None
+            if step_data.get("clip_id"):
+                clip = AudioClip.query.filter_by(clip_code=step_data["clip_id"]).first()
+            sop.steps.append(SopStep(
+                seq=i,
+                title=step_data.get("title") or f"Step {i + 1}",
+                audio_mode=step_data.get("audio_mode", "text"),
+                message=step_data.get("message"),
+                clip_id=clip.id if clip else None,
+                language=step_data.get("language", "EN"),
+            ))
+
+
+@app.route("/audio-alerts/sops", methods=["GET"])
+def aa_sops_get():
+    err = _require_login()
+    if err: return err
+    if not _can("aa.sop.view"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    include_steps = request.args.get("steps", "1") != "0"
+    rows = Sop.query.order_by(Sop.created_at.desc()).all()
+    return jsonify(ok=True, data=[s.to_dict(include_steps=include_steps) for s in rows])
+
+
+@app.route("/audio-alerts/sops/<sop_id>", methods=["GET"])
+def aa_sop_get_one(sop_id):
+    err = _require_login()
+    if err: return err
+    if not _can("aa.sop.view"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    sop = Sop.query.filter_by(sop_code=sop_id).first()
+    if not sop:
+        return jsonify(ok=False, error="SOP not found"), 404
+    return jsonify(ok=True, data=sop.to_dict())
+
+
+@app.route("/audio-alerts/sops", methods=["POST"])
+def aa_sops_post():
+    err = _require_login()
+    if err: return err
+    if not _can("aa.sop.edit"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    data = request.json or {}
+    if not data.get("name"):
+        return jsonify(ok=False, error="Name is required"), 400
+    if not data.get("zone_ids") and not data.get("plant_wide"):
+        return jsonify(ok=False, error="Select target zone(s) or plant-wide"), 400
+
+    sop = Sop(sop_code=_next_sop_code(), created_by=_current_user().get("username", "unknown"))
+    _apply_sop_fields(sop, data)
+    db.session.add(sop)
+    db.session.commit()
+    _add_audit("sop.add", f"sop/{sop.id}", f"SOP: {sop.name}", after=sop.to_dict())
+    return jsonify(ok=True, data=sop.to_dict()), 201
+
+
+@app.route("/audio-alerts/sops/<sop_id>", methods=["PUT"])
+def aa_sops_put(sop_id):
+    err = _require_login()
+    if err: return err
+    if not _can("aa.sop.edit"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    sop = Sop.query.filter_by(sop_code=sop_id).first()
+    if not sop:
+        return jsonify(ok=False, error="SOP not found"), 404
+    before = sop.to_dict()
+    _apply_sop_fields(sop, request.json or {})
+    db.session.commit()
+    _add_audit("sop.edit", f"sop/{sop.id}", f"SOP: {sop.name}", before=before, after=sop.to_dict())
+    return jsonify(ok=True, data=sop.to_dict())
+
+
+@app.route("/audio-alerts/sops/<sop_id>", methods=["DELETE"])
+def aa_sops_delete(sop_id):
+    err = _require_login()
+    if err: return err
+    if not _can("aa.sop.delete"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    sop = Sop.query.filter_by(sop_code=sop_id).first()
+    if not sop:
+        return jsonify(ok=False, error="SOP not found"), 404
+    if sop_service.has_active_execution(Sop, SopExecution, sop.id):
+        return jsonify(ok=False, error="SOP has a currently running execution — cancel it first"), 409
+    before = sop.to_dict()
+    db.session.delete(sop)
+    db.session.commit()
+    _add_audit("sop.delete", f"sop/{sop_id}", f"SOP: {before.get('name')}", before=before)
+    return jsonify(ok=True, data={"id": sop_id})
+
+
+@app.route("/audio-alerts/sops/<sop_id>/steps/<int:step_id>", methods=["DELETE"])
+def aa_sop_step_delete(sop_id, step_id):
+    """Delete a single step (re-sequences remaining steps)."""
+    err = _require_login()
+    if err: return err
+    if not _can("aa.sop.edit"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    sop = Sop.query.filter_by(sop_code=sop_id).first()
+    if not sop:
+        return jsonify(ok=False, error="SOP not found"), 404
+    if sop_service.has_active_execution(Sop, SopExecution, sop.id):
+        return jsonify(ok=False, error="SOP has a currently running execution — cancel it first"), 409
+    step = SopStep.query.filter_by(id=step_id, sop_id=sop.id).first()
+    if not step:
+        return jsonify(ok=False, error="Step not found"), 404
+    db.session.delete(step)
+    db.session.flush()
+    for i, s in enumerate(sorted(sop.steps, key=lambda s: s.seq)):
+        s.seq = i
+    db.session.commit()
+    return jsonify(ok=True, data=sop.to_dict())
+
+
+# ── Execution ───────────────────────────────────────────────
+
+@app.route("/audio-alerts/sops/<sop_id>/start", methods=["POST"])
+def aa_sop_start(sop_id):
+    err = _require_login()
+    if err: return err
+    if not _can("aa.sop.run"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    user = _current_user().get("username", "unknown")
+    out, error = sop_service.start_execution(
+        app, db, Sop, SopExecution, SopStepExecution,
+        dispatch_service.dispatch_broadcast, dispatch_service.all_zone_codes,
+        sop_id, user,
+    )
+    if error:
+        return jsonify(ok=False, error=error), 400
+    _add_audit("sop.start", f"sop-execution/{out['id']}", f"SOP started: {out['sop_name']}", after=out)
+    return jsonify(ok=True, data=out), 201
+
+
+@app.route("/audio-alerts/sops/executions", methods=["GET"])
+def aa_sop_executions():
+    err = _require_login()
+    if err: return err
+    if not _can("aa.sop.view"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    active_only = request.args.get("active") == "1"
+    q = SopExecution.query
+    if active_only:
+        q = q.filter(SopExecution.status.in_(["PLAYING_STEP", "WAITING_FOR_ACKNOWLEDGEMENT"]))
+    limit = max(1, min(200, int(request.args.get("limit", 50))))
+    rows = q.order_by(SopExecution.started_at.desc()).limit(limit).all()
+    return jsonify(ok=True, data=[r.to_dict() for r in rows])
+
+
+@app.route("/audio-alerts/sops/executions/<execution_id>", methods=["GET"])
+def aa_sop_execution_get(execution_id):
+    err = _require_login()
+    if err: return err
+    if not _can("aa.sop.view"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    execution = SopExecution.query.filter_by(execution_code=execution_id).first()
+    if not execution:
+        return jsonify(ok=False, error="Execution not found"), 404
+    return jsonify(ok=True, data=execution.to_dict())
+
+
+@app.route("/audio-alerts/sops/executions/<execution_id>/audit", methods=["GET"])
+def aa_sop_execution_audit(execution_id):
+    err = _require_login()
+    if err: return err
+    if not _can("aa.sop.view"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    execution = SopExecution.query.filter_by(execution_code=execution_id).first()
+    if not execution:
+        return jsonify(ok=False, error="Execution not found"), 404
+    rows = SopStepExecution.query.filter_by(execution_id=execution.id).order_by(SopStepExecution.created_at.asc()).all()
+    return jsonify(ok=True, data=[r.to_dict() for r in rows])
+
+
+@app.route("/audio-alerts/sops/executions/<execution_id>/acknowledge", methods=["POST"])
+def aa_sop_ack(execution_id):
+    err = _require_login()
+    if err: return err
+    if not _can("aa.sop.ack"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    user = _current_user().get("username", "unknown")
+    out, error = sop_service.acknowledge(
+        app, db, SopExecution, SopStepExecution,
+        dispatch_service.dispatch_broadcast, dispatch_service.all_zone_codes,
+        execution_id, user,
+    )
+    if error:
+        return jsonify(ok=False, error=error), 400
+    _add_audit("sop.acknowledge", f"sop-execution/{execution_id}",
+              f"SOP step acknowledged: {out['sop_name']}", after=out)
+    return jsonify(ok=True, data=out)
+
+
+@app.route("/audio-alerts/sops/executions/<execution_id>/cancel", methods=["POST"])
+def aa_sop_cancel(execution_id):
+    err = _require_login()
+    if err: return err
+    if not _can("aa.sop.run"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    user = _current_user().get("username", "unknown")
+    out, error = sop_service.cancel(app, db, SopExecution, SopStepExecution, execution_id, user)
+    if error:
+        return jsonify(ok=False, error=error), 400
+    _add_audit("sop.cancel", f"sop-execution/{execution_id}", f"SOP cancelled: {out['sop_name']}", after=out)
+    return jsonify(ok=True, data=out)
 
 
 # ============================================================
@@ -2537,6 +3376,10 @@ def aa_clips_get():
     return jsonify(ok=True, data=[c.to_dict() for c in AudioClip.query.order_by(AudioClip.id.desc()).all()])
 
 
+def _hash_bytes(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
 @app.route("/audio-alerts/audio/clips", methods=["POST"])
 def aa_clips_post():
     err = _require_login()
@@ -2544,17 +3387,29 @@ def aa_clips_post():
     if not _can("aa.audio.upload"):
         return jsonify(ok=False, error="Permission denied"), 403
     data = {}
+    file_hash = None
     if request.content_type and "multipart/form-data" in request.content_type:
         data = {k: v for k, v in request.form.items()}
         f = request.files.get("file")
         if f:
-            upload_dir = Path(__file__).parent / "uploads" / "clips"
-            upload_dir.mkdir(parents=True, exist_ok=True)
-            filename = f"{uuid.uuid4().hex[:8]}_{f.filename}"
-            filepath = upload_dir / filename
-            f.save(str(filepath))
-            data["file_path"] = str(filepath.resolve())
-            data["format"]    = os.path.splitext(f.filename)[1].lstrip(".").upper()
+            content = f.read()
+            file_hash = _hash_bytes(content)
+            existing = AudioClip.query.filter_by(file_hash=file_hash).first()
+            if existing:
+                # Identical audio already stored — reuse the file, don't write it again.
+                data["file_path"] = existing.file_path
+                data["format"]    = existing.format
+                data["file_size"] = existing.file_size
+                data["duration_sec"] = data.get("duration_sec") or existing.duration_sec
+            else:
+                upload_dir = Path(__file__).parent / "uploads" / "clips"
+                upload_dir.mkdir(parents=True, exist_ok=True)
+                filename = f"{uuid.uuid4().hex[:8]}_{f.filename}"
+                filepath = upload_dir / filename
+                filepath.write_bytes(content)
+                data["file_path"] = str(filepath.resolve())
+                data["format"]    = os.path.splitext(f.filename)[1].lstrip(".").upper()
+                data["file_size"] = len(content)
     else:
         data = request.json or {}
 
@@ -2580,13 +3435,15 @@ def aa_clips_post():
         file_size      = int(data["file_size"])    if data.get("file_size")    else None,
         format         = data.get("format"),
         file_path      = data.get("file_path"),
+        file_hash      = file_hash,
         description    = data.get("description"),
         uploaded_by    = _current_user().get("username", "unknown"),
     )
     db.session.add(clip)
     db.session.commit()
     _add_audit("audio.upload", f"clip/{clip.clip_code}", f"Clip: {clip.name}", after=clip.to_dict())
-    return jsonify(ok=True, data=clip.to_dict()), 201
+    return jsonify(ok=True, data=clip.to_dict(), reused_existing_file=bool(file_hash and AudioClip.query.filter(
+        AudioClip.file_hash == file_hash, AudioClip.id != clip.id).first())), 201
 
 
 @app.route("/audio-alerts/audio/clips/<clip_id>", methods=["PUT"])
@@ -2657,11 +3514,40 @@ def aa_clips_del(clip_id):
     clip = AudioClip.query.filter_by(clip_code=clip_id).first()
     if not clip:
         return jsonify(ok=False, error="Clip not found"), 404
+
+    # Safe delete: refuse if anything still references this clip rather than
+    # silently SET NULL-ing it out from under a rule/schedule/SOP step.
+    refs = []
+    n = AlertRule.query.filter_by(clip_id=clip.id).count()
+    if n: refs.append(f"{n} alert rule(s)")
+    n = ScheduledAnnouncement.query.filter_by(clip_id=clip.id).count()
+    if n: refs.append(f"{n} scheduled announcement(s)")
+    if "SopStep" in globals():
+        n = SopStep.query.filter_by(clip_id=clip.id).count()
+        if n: refs.append(f"{n} SOP step(s)")
+    if refs:
+        return jsonify(ok=False, error=f"Clip is still used by {', '.join(refs)} — remove those references first"), 409
+
     before = clip.to_dict()
     db.session.delete(clip)
     db.session.commit()
     _add_audit("audio.delete", f"clip/{clip_id}", f"Clip: {before.get('name')}", before=before)
     return jsonify(ok=True, data={"id": clip_id})
+
+
+@app.route("/audio-alerts/audio/clips/<clip_id>/file", methods=["GET"])
+def aa_clip_file(clip_id):
+    """Serve the raw audio bytes for in-browser preview playback."""
+    err = _require_login()
+    if err: return err
+    clip = AudioClip.query.filter_by(clip_code=clip_id).first()
+    if not clip or not clip.file_path:
+        return jsonify(ok=False, error="Clip not found"), 404
+    p = Path(clip.file_path)
+    if not p.exists():
+        return jsonify(ok=False, error="Audio file missing on disk"), 404
+    mimetype = "audio/wav" if (clip.format or "").upper() == "WAV" else "audio/mpeg"
+    return send_from_directory(p.parent, p.name, mimetype=mimetype, conditional=True)
 
 
 @app.route("/audio-alerts/audio/templates", methods=["GET"])
@@ -2869,8 +3755,19 @@ def aa_devices_del(dev_id):
 def aa_device_test(dev_id):
     err = _require_login()
     if err: return err
-    return jsonify(ok=True, data={"device_id": dev_id, "status": "test_fired",
-                                  "ts": datetime.now().isoformat()})
+    device = _resolve_device(dev_id)
+    if not device:
+        return jsonify(ok=False, error="Device not found"), 404
+    if not device.address:
+        return jsonify(ok=False, error="No IP address configured for this device"), 400
+    receipt = dispatch_service.send_test_tone(device.address)
+    _add_audit("device.test_fire", f"device/{device.id}", f"Device: {device.label}", after=receipt)
+    return jsonify(ok=receipt.get("ok", False), data={
+        "device_id": dev_id,
+        "status": "test_fired" if receipt.get("edge_delivered") else "test_failed",
+        "ts": datetime.now().isoformat(),
+        "receipt": receipt,
+    })
 
 
 @app.route("/audio-alerts/devices/<dev_id>/restart", methods=["POST"])
@@ -2879,13 +3776,37 @@ def aa_device_restart(dev_id):
     if err: return err
     if not _can("aa.devices.edit"):
         return jsonify(ok=False, error="Permission denied"), 403
-    return jsonify(ok=True, data={"device_id": dev_id, "status": "restart_queued",
-                                  "ts": datetime.now().isoformat()})
+    device = _resolve_device(dev_id)
+    if not device:
+        return jsonify(ok=False, error="Device not found"), 404
+    if not device.address:
+        return jsonify(ok=False, error="No IP address configured for this device"), 400
+    # Edge nodes are unattended headless devices with no remote-reboot agent —
+    # "restart" clears the node's stuck playback queue/state instead of a real
+    # power-cycle, which needs a physical or OS-level remote-reboot capability
+    # this system does not currently have.
+    try:
+        resp = requests.post(
+            f"http://{device.address}:{dispatch_service.EDGE_NODE_PORT}/restart",
+            timeout=8,
+        )
+        ok = resp.status_code == 200
+    except Exception as e:
+        ok = False
+        log.warning("Device restart failed for %s: %s", device.address, e)
+    _add_audit("device.restart", f"device/{device.id}", f"Device: {device.label}", after={"ok": ok})
+    return jsonify(ok=ok, data={
+        "device_id": dev_id,
+        "status": "queue_cleared" if ok else "unreachable",
+        "ts": datetime.now().isoformat(),
+    })
 
 
 @app.route("/audio-alerts/devices/<dev_id>/status", methods=["GET"])
 def aa_device_status(dev_id):
-    """Proxy to http://<device-ip>:5000/status to fetch last heartbeat info."""
+    """Proxy to http://<device-ip>:<edge_port>/health for on-demand refresh
+    (the background heartbeat_service poller keeps this current on its own —
+    this route exists for the dashboard's manual 'Refresh Status' action)."""
     err = _require_login()
     if err: return err
     device = _resolve_device(dev_id)
@@ -2894,9 +3815,10 @@ def aa_device_status(dev_id):
     ip = device.address
     if not ip:
         return jsonify(ok=False, error="No IP address configured for this device"), 400
+    edge_port = _svc_cfg.get("edge_node_port", 5000)
     try:
         req = urllib.request.Request(
-            f"http://{ip}:5000/status",
+            f"http://{ip}:{edge_port}/health",
             headers={"Accept": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -3364,6 +4286,99 @@ def aa_logs_audit():
     })
 
 
+@app.route("/audio-alerts/announcements/history", methods=["GET"])
+def aa_announcement_history():
+    """
+    Unified Announcement History (D1) — merges manual broadcasts, scheduled
+    announcements, live paging sessions, and SOP step executions into one
+    normalized timeline: timestamp, type, target, audio_mode, language, status.
+    """
+    err = _require_login()
+    if err: return err
+    if not _can("aa.logs.view"):
+        return jsonify(ok=False, error="Permission denied"), 403
+
+    page   = max(1, int(request.args.get("page", 1)))
+    size   = max(1, min(200, int(request.args.get("page_size", 50))))
+    type_f = request.args.get("type", "").strip()
+    zone_f = request.args.get("zone", "").strip()
+
+    items = []
+
+    # 1. alert_logs — manual broadcasts + scheduled announcements (+ SOP once tagged)
+    if not type_f or type_f in ("broadcast", "scheduled", "sop"):
+        try:
+            cols = [r[0] for r in db.session.execute(text(
+                "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'alert_logs'"
+            )).fetchall()]
+            if "announcement_type" in cols:
+                where = ["announcement_type IS NOT NULL"]
+                params = {}
+                if type_f:
+                    where.append("announcement_type = :t"); params["t"] = type_f
+                if zone_f:
+                    where.append("zone_code = :z"); params["z"] = zone_f
+                rows = db.session.execute(text(
+                    f"SELECT * FROM alert_logs WHERE {' AND '.join(where)} "
+                    f"ORDER BY alert_timestamp DESC LIMIT 500"
+                ), params).mappings().all()
+                for r in rows:
+                    items.append({
+                        "timestamp":  r["alert_timestamp"].isoformat() if r.get("alert_timestamp") else None,
+                        "type":       r.get("announcement_type") or "broadcast",
+                        "target":     r.get("zone_code") or "—",
+                        "audio_mode": r.get("audio_mode"),
+                        "language":   r.get("lang_code"),
+                        "status":     "delivered" if r.get("edge_delivered") else "failed",
+                        "source":     r.get("alert_source"),
+                    })
+        except Exception as e:
+            log.warning("Announcement history: alert_logs read failed: %s", e)
+
+    # 2. live paging sessions
+    if not type_f or type_f == "paging":
+        q = PagingSession.query
+        for p in q.order_by(PagingSession.started_at.desc()).limit(200).all():
+            target = "Plant-wide" if p.plant_wide else ", ".join(p.zone_ids or []) or "—"
+            if zone_f and not p.plant_wide and zone_f not in (p.zone_ids or []):
+                continue
+            items.append({
+                "timestamp":  p.started_at.isoformat() if p.started_at else None,
+                "type":       "paging",
+                "target":     target,
+                "audio_mode": "live_voice",
+                "language":   None,
+                "status":     p.status,
+                "source":     p.operator,
+            })
+
+    # 3. SOP step executions (present once the SOP subsystem models exist)
+    if ("SopStepExecution" in globals()) and (not type_f or type_f == "sop"):
+        q = SopStepExecution.query
+        for e in q.order_by(SopStepExecution.created_at.desc()).limit(200).all():
+            if zone_f and e.zone_code != zone_f:
+                continue
+            items.append({
+                "timestamp":  e.created_at.isoformat() if e.created_at else None,
+                "type":       "sop",
+                "target":     e.zone_code or "—",
+                "audio_mode": e.audio_mode,
+                "language":   e.language,
+                "status":     e.event_type,
+                "source":     e.operator or "system",
+            })
+
+    items.sort(key=lambda x: x["timestamp"] or "", reverse=True)
+    total = len(items)
+    start = (page - 1) * size
+    return jsonify(ok=True, data={
+        "items": items[start:start + size],
+        "total": total, "page": page, "page_size": size,
+        "pages": max(1, (total + size - 1) // size),
+    })
+
+
 @app.route("/audio-alerts/logs/alert-device", methods=["GET"])
 def aa_logs_alert_device():
     """Read from the external alert_logs table populated by the device alert program."""
@@ -3397,12 +4412,12 @@ def aa_logs_alert_device():
         def _pick(candidates):
             return next((c for c in candidates if c in cols), None)
 
-        name_col     = _pick(["alert_name","name","message","alert_message","alert"])
-        priority_col = _pick(["priority","severity","level","alert_level"])
-        zone_col     = _pick(["zone","zone_name","zone_id","location"])
-        ts_col       = _pick(["timestamp","created_at","triggered_at","alert_time","time","ts"])
-        dest_col     = _pick(["destination_ips","dest_ips","target_ips","device_ips","ip_addresses","destination"])
-        status_col   = _pick(["delivery_status","status","send_status","dispatch_status","delivery_state"])
+        name_col     = _pick(["alert_name","name","message","alert_message","alert","alert_source"])
+        priority_col = _pick(["priority","severity","level","alert_level","alert_category"])
+        zone_col     = _pick(["zone","zone_name","zone_id","location","zone_code"])
+        ts_col       = _pick(["timestamp","alert_timestamp","triggered_at","alert_time","time","ts","created_at"])
+        dest_col     = _pick(["destination_ips","dest_ips","target_ips","device_ips","ip_addresses","destination","device_ip"])
+        status_col   = _pick(["delivery_status","status","send_status","dispatch_status","delivery_state","edge_delivered"])
 
         # Build WHERE clause
         conditions = []
@@ -3505,6 +4520,9 @@ def _run_migrations():
     migrations = [
         "ALTER TABLE tts_templates ADD COLUMN IF NOT EXISTS alert_code VARCHAR(64)",
         "ALTER TABLE alert_rules    ADD COLUMN IF NOT EXISTS notify_emails JSON",
+        "ALTER TABLE audio_clips    ADD COLUMN IF NOT EXISTS file_hash VARCHAR(64)",
+        "ALTER TABLE alert_logs     ADD COLUMN IF NOT EXISTS audio_mode VARCHAR(16)",
+        "ALTER TABLE alert_logs     ADD COLUMN IF NOT EXISTS announcement_type VARCHAR(24)",
         # New tables created automatically by SQLAlchemy — no ALTER needed
         # but we add them here as safety guards:
         """CREATE TABLE IF NOT EXISTS zone_language_configs (
@@ -3625,4 +4643,32 @@ if __name__ == "__main__":
                     db.create_all()
                 except:
                     print("DB Not connected")
+
+    dispatch_service.init(
+        _db_cfg,
+        tts_server_url=_svc_cfg.get("tts_server_url"),
+        edge_node_port=_svc_cfg.get("edge_node_port", 5000),
+    )
+    with app.app_context():
+        _run_migrations()
+    heartbeat_service.start(
+        _db_cfg,
+        edge_port=_svc_cfg.get("edge_node_port", 5000),
+        interval_sec=_svc_cfg.get("heartbeat_interval_sec", 20),
+        offline_after_sec=_svc_cfg.get("heartbeat_offline_after_sec", 60),
+    )
+    scheduler_service.start(
+        app, db, ScheduledAnnouncement,
+        dispatch_service.dispatch_broadcast, dispatch_service.all_zone_codes,
+    )
+    sop_service.start_timeout_checker(
+        app, db, SopExecution, SopStepExecution,
+        dispatch_service.dispatch_broadcast, dispatch_service.all_zone_codes,
+    )
+    mqtt_service.start(
+        _db_cfg,
+        broker_host=_svc_cfg.get("mqtt_broker_host", "localhost"),
+        broker_port=_svc_cfg.get("mqtt_broker_port", 1883),
+    )
+
     app.run("0.0.0.0", port=8000)

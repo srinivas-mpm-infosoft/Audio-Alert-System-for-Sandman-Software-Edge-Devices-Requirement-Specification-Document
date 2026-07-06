@@ -1,0 +1,19 @@
+# Gateway Configuration UI backend (flask_backend.py) + Phase 2 services
+# (dispatch_service.py, heartbeat_service.py, scheduler_service.py,
+#  sop_service.py, mqtt_service.py, events_bus.py)
+
+flask
+flask-sqlalchemy
+pymysql
+bcrypt
+requests
+
+# Live Voice Paging (D2) + real-time dashboard/SOP updates — WebSocket
+flask-sock
+simple-websocket
+websocket-client
+
+# Node heartbeat/status over MQTT (optional — degrades gracefully to the
+# existing HTTP heartbeat poll if this isn't installed or no broker is
+# reachable; requires a broker such as mosquitto, see README)
+paho-mqtt

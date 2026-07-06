@@ -6,6 +6,8 @@ import StatusPill from "./components/StatusPill";
 
 import LiveMonitor from "./LiveMonitor";
 import RuleBuilder from "./RuleBuilder";
+import Schedule from "./Schedule";
+import Sop from "./Sop";
 import AudioConfig from "./AudioConfig";
 import DevicesZones from "./DevicesZones";
 import Analytics from "./Analytics";
@@ -19,6 +21,8 @@ import { AccessDenied } from "./components/EmptyState";
 const SUB_TAB_MAP = {
   live:      LiveMonitor,
   rules:     RuleBuilder,
+  schedule:  Schedule,
+  sop:       Sop,
   audio:     AudioConfig,
   devices:   DevicesZones,
   analytics: Analytics,
@@ -44,6 +48,8 @@ export default function AudioAlerts({ subTab = "live", user }) {
   const permMap = {
     live:      "aa.live.view",
     rules:     "aa.rules.view",
+    schedule:  "aa.schedule.view",
+    sop:       "aa.sop.view",
     audio:     "aa.audio.upload",
     devices:   "aa.devices.view",
     analytics: "aa.analytics.view",
@@ -68,7 +74,7 @@ export default function AudioAlerts({ subTab = "live", user }) {
         </div>
 
         {/* Status strip */}
-        {/* <div className="mt-4 flex flex-wrap items-center gap-3 text-sm">
+        <div className="mt-4 flex flex-wrap items-center gap-3 text-sm">
           <div className="flex items-center gap-2">
             <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Engine</span>
             <StatusPill status={engineStatus === "running" ? "running" : "stopped"} />
@@ -101,7 +107,7 @@ export default function AudioAlerts({ subTab = "live", user }) {
               </div>
             </>
           )}
-        </div> */}
+        </div>
       </div>
 
       {/* Page content */}

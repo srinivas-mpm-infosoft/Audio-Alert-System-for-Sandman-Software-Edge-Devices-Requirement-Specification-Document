@@ -29,6 +29,8 @@ const IO_SUB_TAB_MAP = {
 const AA_SUB_TAB_MAP = {
   "aa-live":      "live",
   "aa-rules":     "rules",
+  "aa-schedule":  "schedule",
+  "aa-sop":       "sop",
   "aa-audio":     "audio",
   "aa-devices":   "devices",
   "aa-analytics": "analytics",

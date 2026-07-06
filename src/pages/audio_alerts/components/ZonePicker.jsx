@@ -59,6 +59,24 @@ export default function ZonePicker({ selected = [], onChange, label = "Zones", d
 
       {open && (
         <div className="absolute z-50 top-full mt-1 w-full bg-white border border-slate-200 rounded-xl shadow-lg max-h-60 overflow-y-auto" role="listbox" aria-multiselectable="true">
+          {zones.length > 0 && (
+            <div className="flex items-center justify-between px-3 py-1.5 border-b border-slate-100 sticky top-0 bg-white">
+              <button
+                type="button"
+                onClick={() => onChange(zones.map((z) => z.id))}
+                className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-800"
+              >
+                Select all (plant-wide)
+              </button>
+              <button
+                type="button"
+                onClick={() => onChange([])}
+                className="text-[11px] font-medium text-slate-400 hover:text-slate-600"
+              >
+                Clear
+              </button>
+            </div>
+          )}
           {zones.length === 0 ? (
             <div className="px-4 py-3 text-sm text-slate-400">Loading zones…</div>
           ) : (

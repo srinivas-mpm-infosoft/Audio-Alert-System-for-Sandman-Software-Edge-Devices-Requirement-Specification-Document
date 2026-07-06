@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from "react";
-import { Activity, AlertTriangle, CheckCircle2, Clock, Volume2, Megaphone, ChevronDown, ChevronUp, Loader2, Radio } from "lucide-react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
+import { Activity, AlertTriangle, CheckCircle2, Clock, Volume2, Megaphone, ChevronDown, ChevronUp, Loader2, Radio, Upload } from "lucide-react";
 import { useAlertsStore } from "../../store/useAlertsStore";
 import { useAlerts } from "./hooks/useAlerts";
 import { useCan } from "./hooks/useCan";
@@ -14,10 +14,12 @@ import ConfirmDialog from "./components/ConfirmDialog";
 import ZonePicker from "./components/ZonePicker";
 import LanguagePicker from "./components/LanguagePicker";
 import EmptyState from "./components/EmptyState";
+import PagingPanel from "./components/PagingPanel";
+import AudioPreviewButton from "./components/AudioPreviewButton";
 import { PRIORITY_CONFIG } from "./utils/priorityConfig";
 import { PRIORITIES } from "./utils/constants";
 import { timeAgo, elapsedSeconds, formatDuration } from "./utils/formatters";
-import { getClips } from "./api/audio.api";
+import { getClips, uploadClip } from "./api/audio.api";
 
 export default function LiveMonitor() {
   useAlerts();
@@ -34,15 +36,35 @@ export default function LiveMonitor() {
   const [broadcastBusy, setBroadcastBusy] = useState(false);
   const [broadcastConfirm, setBroadcastConfirm] = useState(false);
   const [clips, setClips] = useState([]);
+  const [clipUploading, setClipUploading] = useState(false);
+  const clipFileRef = useRef(null);
 
   useEffect(() => {
     getClips().then((r) => { if (r.ok) setClips(r.data); });
   }, []);
 
+  const handleInlineUpload = async (file) => {
+    if (!file) return;
+    setClipUploading(true);
+    try {
+      const res = await uploadClip({ name: file.name.replace(/\.[^.]+$/, ""), language: broadcastLang }, file);
+      if (res.ok) {
+        setClips((c) => [res.data, ...c]);
+        setBroadcastClipId(res.data.id);
+        showToast(res.reused_existing_file ? "Identical audio already in the library — reusing it" : "File uploaded", "success");
+      } else {
+        showToast(res.error || "Upload failed", "error");
+      }
+    } finally {
+      setClipUploading(false);
+    }
+  };
+
   const showToast = useToast();
   const user = useAuthStore((s) => s.user);
   const canAck = useCan("aa.alerts.ack");
   const canBroadcast = useCan("aa.broadcast.manual");
+  const canPage = useCan("aa.paging.use");
 
   // Live elapsed timer for now-playing card
   useEffect(() => {
@@ -250,19 +272,39 @@ export default function LiveMonitor() {
                   />
                 </div>
               ) : (
-                <div>
+                <div className="flex flex-col gap-2">
                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block">Audio Clip</label>
-                  <select
-                    value={broadcastClipId}
-                    onChange={(e) => setBroadcastClipId(e.target.value)}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 text-slate-700"
-                    aria-label="Select audio clip"
-                  >
-                    <option value="">Select a clip…</option>
-                    {clips.filter((c) => !broadcastLang || c.language === broadcastLang).map((c) => (
-                      <option key={c.id} value={c.id}>{c.name} ({c.duration_sec}s)</option>
-                    ))}
-                  </select>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={broadcastClipId}
+                      onChange={(e) => setBroadcastClipId(e.target.value)}
+                      className="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 text-slate-700"
+                      aria-label="Select audio clip"
+                    >
+                      <option value="">Select a clip…</option>
+                      {clips.filter((c) => !broadcastLang || c.language === broadcastLang).map((c) => (
+                        <option key={c.id} value={c.id}>{c.name} ({c.duration_sec}s)</option>
+                      ))}
+                    </select>
+                    {broadcastClipId && (
+                      <AudioPreviewButton payload={{ clip_id: broadcastClipId }} label="Preview" />
+                    )}
+                  </div>
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => clipFileRef.current?.click()}
+                      disabled={clipUploading}
+                      className="inline-flex items-center gap-1.5 text-xs font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50"
+                    >
+                      {clipUploading ? <Loader2 size={12} className="animate-spin" aria-hidden="true" /> : <Upload size={12} aria-hidden="true" />}
+                      {clipUploading ? "Uploading…" : "or upload a new MP3/WAV file"}
+                    </button>
+                    <input
+                      ref={clipFileRef} type="file" accept=".wav,.mp3,audio/*" className="hidden"
+                      onChange={(e) => { handleInlineUpload(e.target.files?.[0] || null); e.target.value = ""; }}
+                    />
+                  </div>
                 </div>
               )}
 
@@ -288,6 +330,9 @@ export default function LiveMonitor() {
           )}
         </div>
       )}
+
+      {/* Live voice paging */}
+      {canPage && <PagingPanel />}
 
       <ConfirmDialog
         open={broadcastConfirm}

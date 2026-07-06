@@ -50,6 +50,10 @@ export async function deleteClip(id) {
   return res.json();
 }
 
+export function getClipFileUrl(id) {
+  return `${targetUrl}/audio-alerts/audio/clips/${id}/file`;
+}
+
 // ── TTS Templates ──────────────────────────────────────────────
 
 export async function getTemplates(filters = {}) {

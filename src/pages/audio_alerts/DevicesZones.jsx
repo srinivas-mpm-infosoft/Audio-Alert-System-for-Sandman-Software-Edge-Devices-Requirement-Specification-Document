@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import { Plus, ChevronRight, ChevronDown, Loader2, RefreshCw, MapPin, Building2, Pencil, Trash2, Check, X, WifiOff, Edit2, Globe, Save } from "lucide-react";
 import { useDevices } from "./hooks/useDevices";
 import { useCan } from "./hooks/useCan";
+import { useDashboardEvents } from "./hooks/useDashboardEvents";
 import {
   addDevice, updateDevice, getDeviceStatus,
   getPlants, getLines, getZones,
@@ -16,7 +17,7 @@ import StatusPill from "./components/StatusPill";
 import ConfirmDialog from "./components/ConfirmDialog";
 import EmptyState from "./components/EmptyState";
 import { DEVICE_TYPES } from "./utils/constants";
-import { timeAgo } from "./utils/formatters";
+import { timeAgo, formatDuration } from "./utils/formatters";
 import { targetUrl as BASE_URL } from "../../config";
 
 const LABEL = "text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block";
@@ -556,6 +557,20 @@ export default function DevicesZones() {
   const [savingIp, setSavingIp]       = useState(false);
 
   useEffect(() => { load(); }, [load]);
+
+  // Real-time zone/device status — heartbeat_service pushes a device_status
+  // event on every online/offline transition, so the table/detail panel
+  // update on their own without a manual refresh or full page reload.
+  const refreshTimerRef = React.useRef(null);
+  useDashboardEvents(useCallback((event) => {
+    if (event.type !== "device_status") return;
+    if (refreshTimerRef.current) return;
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null;
+      refreshDevices();
+    }, 500);
+  }, [refreshDevices]));
+
   useEffect(() => {
     if (plants.length) {
       setExpandedPlants(new Set(plants.map((p) => p.id)));
@@ -804,6 +819,24 @@ export default function DevicesZones() {
                     <p className="text-xs text-slate-400 italic">No status data</p>
                   )}
                 </div>
+
+                {selectedDevice.health && (
+                  <div>
+                    <p className={LABEL}>Node Health {selectedDevice.health_updated_at && <span className="normal-case font-normal text-slate-400">· {timeAgo(selectedDevice.health_updated_at)}</span>}</p>
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-xs"><span className="text-slate-500">CPU Temperature</span><span className="font-mono font-semibold">{selectedDevice.health.cpu_temp_c != null ? `${selectedDevice.health.cpu_temp_c}°C` : "—"}</span></div>
+                      <div className="flex justify-between text-xs"><span className="text-slate-500">Uptime</span><span className="font-mono font-semibold">{selectedDevice.health.uptime_sec != null ? formatDuration(Math.floor(selectedDevice.health.uptime_sec)) : "—"}</span></div>
+                      <div className="flex justify-between text-xs"><span className="text-slate-500">Memory Used</span><span className="font-mono font-semibold">{selectedDevice.health.mem_percent != null ? `${selectedDevice.health.mem_percent}%` : "—"}</span></div>
+                      <div className="flex justify-between text-xs"><span className="text-slate-500">Audio Queue</span><span className="font-mono font-semibold">{selectedDevice.health.queue_depth ?? 0}</span></div>
+                      <div className="flex justify-between text-xs">
+                        <span className="text-slate-500">Playback</span>
+                        <span className="font-mono font-semibold">
+                          {selectedDevice.health.paging_active ? "Live Paging" : selectedDevice.health.currently_playing ? `Playing #${selectedDevice.health.currently_playing}` : "Idle"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {selectedDevice.metrics && (
                   <div>

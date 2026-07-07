@@ -250,6 +250,7 @@ def update_log_audio_played(conn, alert_id):
 # TTS server client
 # ══════════════════════════════════════════════════════════════════════════════
 
+# NOTE: conceptually mirrors ../dispatch_service.py's call_synthesise() — not shared code, keep in sync manually if either changes.
 def call_synthesise(text, lang_code, alert_id=0, zone_code='',
                     alert_category='Normal', device_ip='', alert_source='') -> dict:
     """
@@ -439,12 +440,16 @@ def _handle_guarded(alert, local_conn):
     try: _handle_alert(alert, local_conn)
     finally: _sem.release()
 
-def process_alert(alert, local_conn):
+def process_alert(alert, local_conn) -> bool:
+    """Returns True if dispatched (semaphore acquired, handler thread spawned),
+    False if dropped because the semaphore was busy — caller must not advance
+    its cursor past a dropped alert so it gets retried next poll cycle."""
     if not _sem.acquire(timeout=5):
-        log.warning(f"[Alert {alert['id']}] Semaphore busy — skip")
-        return
+        log.warning(f"[Alert {alert['id']}] Semaphore busy — will retry next poll cycle")
+        return False
     threading.Thread(target=_handle_guarded, args=(alert,local_conn),
                      daemon=True, name=f"alert-{alert['id']}").start()
+    return True
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Acknowledge checker — every 3s
@@ -531,7 +536,12 @@ def poll_loop(local_conn, cloud_conn) -> None:
                 if alerts:
                     log.info(f"[Poll] {len(alerts)} new: {[a['id'] for a in alerts]}")
                     for a in alerts:
-                        process_alert(a, local_conn); last_id=max(last_id,a['id'])
+                        if process_alert(a, local_conn):
+                            last_id=max(last_id,a['id'])
+                        else:
+                            log.warning(f"[Poll] Dropped alert {a['id']} — stopping "
+                                        f"batch here, will retry from this id next cycle")
+                            break
                 elif time.monotonic()-last_hb>=HEARTBEAT_SEC:
                     log.info(f"[Poll] ♥ cycle={cycle} last_id={last_id} unacked={len(_unacked)}")
                     last_hb=time.monotonic()

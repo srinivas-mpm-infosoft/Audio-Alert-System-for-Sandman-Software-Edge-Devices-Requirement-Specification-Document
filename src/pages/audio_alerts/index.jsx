@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from "react";
-import { Loader2, AlertCircle, Volume2, Wifi, Radio, Clock } from "lucide-react";
+import { Volume2, Cpu, Clock } from "lucide-react";
 import { getAudioAlertConfig } from "./api/alerts.api";
 import { useAlertsStore } from "../../store/useAlertsStore";
-import StatusPill from "./components/StatusPill";
 
 import LiveMonitor from "./LiveMonitor";
-import RuleBuilder from "./RuleBuilder";
+import ManualBroadcast from "./ManualBroadcast";
+import LivePaging from "./LivePaging";
+// import RuleBuilder from "./RuleBuilder"; // Rule Builder hidden from navigation for now
 import Schedule from "./Schedule";
 import Sop from "./Sop";
 import AudioConfig from "./AudioConfig";
@@ -20,7 +21,9 @@ import { AccessDenied } from "./components/EmptyState";
 // access tab removed — User Management is now a top-level gateway page
 const SUB_TAB_MAP = {
   live:      LiveMonitor,
-  rules:     RuleBuilder,
+  broadcast: ManualBroadcast,
+  paging:    LivePaging,
+  // rules:     RuleBuilder, // Rule Builder hidden from navigation for now
   schedule:  Schedule,
   sop:       Sop,
   audio:     AudioConfig,
@@ -31,7 +34,7 @@ const SUB_TAB_MAP = {
 };
 
 export default function AudioAlerts({ subTab = "live", user }) {
-  const { activeCount, criticalCount, unackedCount, speakersUp, speakersTotal, gatewaysUp, gatewaysTotal, engineStatus, lastSync, setSystemStatus } = useAlertsStore();
+  const { gatewaysUp, gatewaysTotal, lastSync, setSystemStatus } = useAlertsStore();
   const [configLoaded, setConfigLoaded] = useState(false);
   const canViewLive = useCan("aa.live.view");
 
@@ -47,7 +50,9 @@ export default function AudioAlerts({ subTab = "live", user }) {
   // Gate full-page access by permission
   const permMap = {
     live:      "aa.live.view",
-    rules:     "aa.rules.view",
+    broadcast: "aa.broadcast.manual",
+    paging:    "aa.paging.use",
+    // rules:     "aa.rules.view", // Rule Builder hidden from navigation for now
     schedule:  "aa.schedule.view",
     sop:       "aa.sop.view",
     audio:     "aa.audio.upload",
@@ -75,28 +80,9 @@ export default function AudioAlerts({ subTab = "live", user }) {
 
         {/* Status strip */}
         <div className="mt-4 flex flex-wrap items-center gap-3 text-sm">
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Engine</span>
-            <StatusPill status={engineStatus === "running" ? "running" : "stopped"} />
-          </div>
-          <div className="h-4 w-px bg-slate-200" aria-hidden="true" />
-          <div className="flex items-center gap-1.5">
-            <span className="inline-flex items-center gap-1 text-red-600 font-semibold">
-              <AlertCircle size={14} aria-hidden="true" />
-              <span className="text-[11px]">{criticalCount} Critical</span>
-            </span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="text-[11px] text-slate-600 font-medium">{unackedCount} Unacknowledged</span>
-          </div>
-          <div className="h-4 w-px bg-slate-200" aria-hidden="true" />
           <div className="flex items-center gap-1 text-[11px] text-slate-500">
-            <Volume2 size={12} aria-hidden="true" />
-            <span>{speakersUp}/{speakersTotal} Speakers up</span>
-          </div>
-          <div className="flex items-center gap-1 text-[11px] text-slate-500">
-            <Wifi size={12} aria-hidden="true" />
-            <span>{gatewaysUp}/{gatewaysTotal} Gateways up</span>
+            <Cpu size={12} aria-hidden="true" />
+            <span>{gatewaysUp}/{gatewaysTotal} Edge Nodes up</span>
           </div>
           {lastSync && (
             <>

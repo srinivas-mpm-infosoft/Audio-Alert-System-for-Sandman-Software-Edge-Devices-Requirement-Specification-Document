@@ -3,6 +3,7 @@ import { ArrowLeft, Save, Loader2, Upload } from "lucide-react";
 import ZonePicker from "./components/ZonePicker";
 import LanguagePicker from "./components/LanguagePicker";
 import AudioPreviewButton from "./components/AudioPreviewButton";
+import TimeWheelPicker from "./components/TimeWheelPicker";
 import { getClips, uploadClip } from "./api/audio.api";
 
 const INPUT = "w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 focus:border-zinc-400 text-slate-700";
@@ -13,6 +14,14 @@ const DAYS = [
   { v: 0, l: "Mon" }, { v: 1, l: "Tue" }, { v: 2, l: "Wed" }, { v: 3, l: "Thu" },
   { v: 4, l: "Fri" }, { v: 5, l: "Sat" }, { v: 6, l: "Sun" },
 ];
+
+function todayLocalDateString() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
 
 function blank(initial) {
   return {
@@ -176,12 +185,28 @@ export default function ScheduleForm({ initialSchedule, onSave, onCancel }) {
           ))}
         </div>
 
-        {form.schedule_type === "once" && (
-          <div>
-            <label className={LABEL}>Date &amp; Time</label>
-            <input type="datetime-local" className={INPUT} value={form.scheduled_at} onChange={(e) => set("scheduled_at", e.target.value)} />
-          </div>
-        )}
+        {form.schedule_type === "once" && (() => {
+          const datePart = form.scheduled_at ? form.scheduled_at.slice(0, 10) : "";
+          const timePart = form.scheduled_at ? form.scheduled_at.slice(11, 16) : "09:00";
+          return (
+            <div className="flex flex-wrap items-end gap-4">
+              <div>
+                <label className={LABEL}>Date</label>
+                <input
+                  type="date"
+                  className={INPUT}
+                  value={datePart}
+                  onChange={(e) => set("scheduled_at", `${e.target.value}T${timePart}`)}
+                />
+              </div>
+              <TimeWheelPicker
+                value={timePart}
+                onChange={(v) => set("scheduled_at", `${datePart || todayLocalDateString()}T${v}`)}
+                label="Time"
+              />
+            </div>
+          );
+        })()}
 
         {form.schedule_type !== "once" && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -204,8 +229,7 @@ export default function ScheduleForm({ initialSchedule, onSave, onCancel }) {
               </div>
             )}
             <div>
-              <label className={LABEL}>Time of Day</label>
-              <input type="time" className={INPUT} value={form.time_of_day} onChange={(e) => set("time_of_day", e.target.value)} />
+              <TimeWheelPicker value={form.time_of_day} onChange={(v) => set("time_of_day", v)} label="Time of Day" />
             </div>
           </div>
         )}

@@ -54,7 +54,7 @@ import events_bus
 # STATIC PATHS  (only BASE is fixed; everything else is configurable)
 # ============================================================
 
-BASE               = Path("/home/recomputer/SSD-backup/Gateway-Backend/Main Application")
+BASE               = Path("/home/srinivas/ReComputer-r1125-Gateway-UI-All-test/Main Application")
 STATIC             = BASE / "static"
 CONFIG_FILE        = BASE / "config.json"
 SYSTEM_CONFIG_FILE = BASE / "system_config.json"
@@ -183,7 +183,7 @@ DEFAULT_SYSTEM_CONFIG = {
     "app": {
         "server_host":          "0.0.0.0",
         "server_port":          8000,
-        "log_root":             "/home/recomputer/SSD-backup/logs",
+        "log_root":             "/home/srinivas/ReComputer-r1125-Gateway-UI-All-test/Main Application",
         "session_lifetime_days": 365,
         "cookie_secure":        False,
         "cookie_samesite":      "Lax",
@@ -193,7 +193,7 @@ DEFAULT_SYSTEM_CONFIG = {
         "port":     3306,
         "name":     "gateway",
         "user":     "gateway",
-        "password": "gateway",
+        "password": "Gateway_2025",
     },
     "cors_origins": [
         "http://localhost:5173",
@@ -1009,7 +1009,7 @@ class SopStepExecution(db.Model):
     timeout-replay / completed / cancelled / failed)."""
     __tablename__ = "sop_step_executions"
     id           = Column(BigInteger, primary_key=True)
-    execution_id = Column(Integer, ForeignKey("sop_executions.id", ondelete="CASCADE"), nullable=False)
+    execution_id = Column(BigInteger, ForeignKey("sop_executions.id", ondelete="CASCADE"), nullable=False)
     sop_id       = Column(Integer)
     step_id      = Column(Integer)
     step_number  = Column(Integer)
@@ -1792,8 +1792,8 @@ def aa_config_get():
     # refresh engine counts from DB
     speakers_total = Device.query.filter_by(device_type="Speaker").count()
     speakers_up    = Device.query.filter_by(device_type="Speaker", status="online").count()
-    gateways_total = Device.query.filter_by(device_type="Gateway").count()
-    gateways_up    = Device.query.filter_by(device_type="Gateway", status="online").count()
+    gateways_total = Device.query.filter_by(device_type="Edge Node").count()
+    gateways_up    = Device.query.filter_by(device_type="Edge Node", status="online").count()
     _engine_runtime.update({
         "speakers_total": speakers_total, "speakers_up": speakers_up,
         "gateways_total": gateways_total, "gateways_up": gateways_up,
@@ -2254,8 +2254,8 @@ def aa_active():
 
     speakers_total = Device.query.filter_by(device_type="Speaker").count()
     speakers_up    = Device.query.filter_by(device_type="Speaker", status="online").count()
-    gateways_total = Device.query.filter_by(device_type="Gateway").count()
-    gateways_up    = Device.query.filter_by(device_type="Gateway", status="online").count()
+    gateways_total = Device.query.filter_by(device_type="Edge Node").count()
+    gateways_up    = Device.query.filter_by(device_type="Edge Node", status="online").count()
     engine = {**_engine_runtime,
               "speakers_total": speakers_total, "speakers_up": speakers_up,
               "gateways_total": gateways_total, "gateways_up": gateways_up,
@@ -2349,10 +2349,23 @@ def aa_broadcast():
             return jsonify(ok=False, error="Clip not found or has no audio file"), 404
         clip_path = clip.file_path
 
-    receipts = dispatch_service.dispatch_broadcast(
-        zone_ids, message=message, clip_path=clip_path, language=language,
-        alert_category=data.get("priority", "Normal"), alert_source="Manual Broadcast",
-    )
+    user = _current_user().get("username", "unknown")
+    events_bus.publish({
+        "type": "manual_broadcast", "event": "start", "operator": user,
+        "zone_ids": zone_ids, "plant_wide": False,
+        "timestamp": datetime.now().isoformat(),
+    })
+    try:
+        receipts = dispatch_service.dispatch_broadcast(
+            zone_ids, message=message, clip_path=clip_path, language=language,
+            alert_category=data.get("priority", "Normal"), alert_source="Manual Broadcast",
+        )
+    finally:
+        events_bus.publish({
+            "type": "manual_broadcast", "event": "end", "operator": user,
+            "zone_ids": zone_ids, "plant_wide": False,
+            "timestamp": datetime.now().isoformat(),
+        })
     delivered = sum(1 for r in receipts if r.get("edge_delivered"))
 
     _add_audit("broadcast.manual", "broadcast", "Manual Broadcast",
@@ -4537,6 +4550,78 @@ def _run_migrations():
             `key`   VARCHAR(128) NOT NULL PRIMARY KEY,
             `value` TEXT
         )""",
+        """CREATE TABLE IF NOT EXISTS sops (
+            id              INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            sop_code        VARCHAR(32) NOT NULL,
+            name            VARCHAR(255) NOT NULL,
+            description     TEXT,
+            zone_ids        JSON,
+            plant_wide      BOOLEAN,
+            ack_timeout_sec INT,
+            is_active       BOOLEAN,
+            created_by      VARCHAR(64),
+            created_at      DATETIME,
+            updated_at      DATETIME,
+            UNIQUE KEY uq_sops_sop_code (sop_code)
+        )""",
+        """CREATE TABLE IF NOT EXISTS sop_steps (
+            id         INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            sop_id     INT NOT NULL,
+            seq        INT,
+            title      VARCHAR(255) NOT NULL,
+            audio_mode VARCHAR(16),
+            message    TEXT,
+            clip_id    INT,
+            language   VARCHAR(8),
+            FOREIGN KEY (sop_id) REFERENCES sops(id) ON DELETE CASCADE,
+            FOREIGN KEY (clip_id) REFERENCES audio_clips(id) ON DELETE SET NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS sop_executions (
+            id                  BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            execution_code      VARCHAR(32) NOT NULL,
+            sop_id              INT NOT NULL,
+            sop_name            VARCHAR(255),
+            status              VARCHAR(24),
+            current_step_index  INT,
+            retry_count         INT,
+            zone_ids            JSON,
+            plant_wide          BOOLEAN,
+            started_by          VARCHAR(64),
+            started_at          DATETIME,
+            step_started_at     DATETIME,
+            completed_at        DATETIME,
+            error               TEXT,
+            UNIQUE KEY uq_sop_executions_execution_code (execution_code),
+            FOREIGN KEY (sop_id) REFERENCES sops(id) ON DELETE CASCADE
+        )""",
+        """CREATE TABLE IF NOT EXISTS sop_step_executions (
+            id           BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            execution_id BIGINT NOT NULL,
+            sop_id       INT,
+            step_id      INT,
+            step_number  INT,
+            event_type   VARCHAR(32),
+            audio_mode   VARCHAR(16),
+            zone_code    VARCHAR(64),
+            language     VARCHAR(8),
+            operator     VARCHAR(64),
+            retry_count  INT,
+            created_at   DATETIME,
+            FOREIGN KEY (execution_id) REFERENCES sop_executions(id) ON DELETE CASCADE
+        )""",
+        """CREATE TABLE IF NOT EXISTS paging_sessions (
+            id           INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            session_code VARCHAR(32) NOT NULL,
+            operator     VARCHAR(64) NOT NULL,
+            zone_ids     JSON,
+            plant_wide   BOOLEAN,
+            device_ips   JSON,
+            status       VARCHAR(16),
+            error        TEXT,
+            started_at   DATETIME,
+            ended_at     DATETIME,
+            UNIQUE KEY uq_paging_sessions_session_code (session_code)
+        )""",
     ]
     with db.engine.connect() as conn:
         for sql in migrations:
@@ -4641,8 +4726,8 @@ if __name__ == "__main__":
             if is_mysql_up():
                 try:
                     db.create_all()
-                except:
-                    print("DB Not connected")
+                except Exception as e:
+                    log.error("db.create_all() failed: %s", e, exc_info=True)
 
     dispatch_service.init(
         _db_cfg,

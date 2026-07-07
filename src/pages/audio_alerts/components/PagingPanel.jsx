@@ -23,8 +23,8 @@ const STATE_LABEL = {
   [STATE.ERROR]: "Hold to Talk",
 };
 
-export default function PagingPanel() {
-  const [open, setOpen] = useState(false);
+export default function PagingPanel({ defaultOpen = false }) {
+  const [open, setOpen] = useState(defaultOpen);
   const [zoneIds, setZoneIds] = useState([]);
   const [plantWide, setPlantWide] = useState(false);
   const [state, setState] = useState(STATE.IDLE);

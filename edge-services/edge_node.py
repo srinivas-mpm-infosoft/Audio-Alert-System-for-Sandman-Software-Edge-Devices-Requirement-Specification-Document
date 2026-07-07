@@ -239,34 +239,68 @@ def _mqtt_publish_loop():
 # ══════════════════════════════════════════════════════════════════════════════
 
 _playing=[None]; _play_lock=Lock()
+# Guarded by _play_lock together with _playing above:
+_current_proc      = [None]   # live subprocess.Popen handle for the in-flight _play_file, or None
+_playing_priority  = [None]   # alert_category string ('Critical'/'High'/'Normal'/'Low') of what's in flight
 
-def _play_file(audio_path: str, alert_id: int, alert_category: str) -> bool:
-    """Play audio file via cvlc. Blocks until done. Returns True on success."""
+def _play_file(audio_path: str, alert_id: int, alert_category: str) -> str:
+    """
+    Play audio file via cvlc. Blocks until done, interrupted (paging
+    preemption via _current_proc[0].terminate()), or failed.
+    Returns one of: 'completed', 'interrupted', 'failed'.
+    """
     device=_get_audio_device()
     cmd=['cvlc','--play-and-exit','--quiet']
     if device: cmd+=['--aout=alsa',f'--alsa-audio-device={device}']
     cmd.append(audio_path)
-    with _play_lock: _playing[0]=alert_id
+    with _play_lock:
+        _playing[0]=alert_id
+        _playing_priority[0]=alert_category
     t0=time.monotonic()
     log.info(f"[Play] START alert={alert_id} cat={alert_category}  "
              f"device={device or 'default'}")
+    result='failed'
     try:
-        r=subprocess.run(cmd,stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL,timeout=120)
+        proc=subprocess.Popen(cmd,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        with _play_lock:
+            _current_proc[0]=proc
+        try:
+            proc.wait(timeout=120)
+        except subprocess.TimeoutExpired:
+            log.error(f"[Play] Timeout alert={alert_id}")
+            proc.kill()
+            proc.wait()
         log.info(f"[Play] DONE  alert={alert_id}  "
-                 f"{time.monotonic()-t0:.2f}s  code={r.returncode}")
-        return r.returncode==0
-    except FileNotFoundError: log.error("[Play] cvlc not found — sudo apt install vlc")
-    except subprocess.TimeoutExpired: log.error(f"[Play] Timeout alert={alert_id}")
-    except Exception as e: log.error(f"[Play] Error: {e}")
+                 f"{time.monotonic()-t0:.2f}s  code={proc.returncode}")
+        if proc.returncode==0:
+            result='completed'
+        elif proc.returncode is not None and proc.returncode<0:
+            result='interrupted'
+        else:
+            result='failed'
+    except FileNotFoundError:
+        log.error("[Play] cvlc not found — sudo apt install vlc")
+        result='failed'
+    except Exception as e:
+        log.error(f"[Play] Error: {e}")
+        result='failed'
     finally:
-        with _play_lock: _playing[0]=None
-    return False
+        with _play_lock:
+            _playing[0]=None
+            _playing_priority[0]=None
+            _current_proc[0]=None
+    return result
 
-def _play_item(item: dict) -> None:
+def _play_item(item: dict) -> str:
     item['last_played_at']=time.monotonic()
     item['play_count']=item.get('play_count',0)+1
-    _play_file(item['audio_path'], item['alert_id'], item['alert_category'])
+    result=_play_file(item['audio_path'], item['alert_id'], item['alert_category'])
+    if result=='interrupted':
+        # Make the item instantly eligible to replay again — _due_high() treats
+        # last_played_at is None as "instantly due" and _next_normal() requires
+        # last_played_at is None to be selectable.
+        item['last_played_at']=None
+    return result
 
 def _remove_from_queue(alert_id: int) -> Optional[str]:
     """Remove item from queue, return audio_path for cleanup."""
@@ -316,7 +350,11 @@ def _worker():
         # ── Normal/Low: play once, auto-ack ──────────────────────────────────
         normal = _next_normal()
         if normal:
-            _play_item(normal)
+            result = _play_item(normal)
+            if result == 'interrupted':
+                # Preempted by a live page — leave it queued (already made
+                # re-eligible for replay by _play_item) and don't ack/delete.
+                continue
             with _queue_lock: normal['acknowledged']=True
             log.info(f"[Queue] Auto-acked alert={normal['alert_id']} "
                      f"({normal['alert_category']})")
@@ -369,13 +407,8 @@ def play():
     if not mp3_bytes:
         return jsonify({'error': 'empty audio'}), 400
 
-    # Reject duplicate
-    with _queue_lock:
-        if any(i['alert_id']==alert_id and not i['acknowledged'] for i in _queue):
-            log.info(f"[Queue] alert={alert_id} already queued")
-            return jsonify({'queued': False, 'reason': 'duplicate'}), 200
-
-    # Save to disk
+    # Save to disk (idempotent overwrite — harmless even if this turns out to
+    # be a duplicate, since it's the same target filename either way)
     audio_path = str(AUDIO_FILES_DIR / f"{alert_id}.mp3")
     try:
         with open(audio_path, 'wb') as f: f.write(mp3_bytes)
@@ -398,7 +431,13 @@ def play():
         'play_count':     0,
     }
 
+    # Duplicate-check AND append in a single critical section so two
+    # near-simultaneous /play requests for the same new alert_id can't both
+    # pass the check and both get enqueued.
     with _queue_lock:
+        if any(i['alert_id']==alert_id and not i['acknowledged'] for i in _queue):
+            log.info(f"[Queue] alert={alert_id} already queued")
+            return jsonify({'queued': False, 'reason': 'duplicate'}), 200
         _queue.append(item); depth=len(_queue)
 
     log.info(f"[Queue] Enqueued alert={alert_id} cat={alert_category} "
@@ -500,7 +539,13 @@ def restart():
         cleared = len(_queue)
         _queue.clear()
     with _play_lock:
+        proc_to_stop = _current_proc[0]
         _playing[0] = None
+    if proc_to_stop is not None:
+        try:
+            proc_to_stop.terminate()
+        except Exception:
+            pass
     log.info(f"[Queue] Restart requested — cleared {cleared} item(s)")
     return jsonify({'restarted': True, 'cleared': cleared, 'ts': time.time()})
 
@@ -540,6 +585,43 @@ def paging_ws(ws):
             ws.close(reason=1013, message='Paging session already active on this node')
             return
         _paging_active[0] = True
+
+    # ── Arbitrate with queued-alert playback before starting the live page ──
+    # HIGH/NORMAL/LOW currently playing: interrupt it immediately.
+    # CRITICAL currently playing: wait for it to finish, capped at 45s, then
+    # proceed with paging anyway — never permanently block an operator.
+    deadline = time.monotonic() + 45.0
+    while True:
+        with _play_lock:
+            cur_priority = _playing_priority[0]
+            cur_proc     = _current_proc[0]
+
+        if cur_priority == 'Critical':
+            if time.monotonic() >= deadline:
+                log.warning("[Paging] proceeding after timing out waiting for "
+                            "CRITICAL alert to finish")
+                break
+            try:
+                # Drain incoming frames while we wait so the upstream relay's
+                # WebSocket (5s socket timeout) never blocks on a send to us.
+                ws.receive(timeout=0.2)
+            except ConnectionClosed:
+                with _paging_lock:
+                    _paging_active[0] = False
+                log.info("[Paging] Caller hung up while waiting for CRITICAL "
+                         "alert to finish — aborting session")
+                return
+            continue
+
+        if cur_proc is not None:
+            # High/Normal/Low currently playing — preempt it immediately.
+            # This causes _play_file's proc.wait() to return with a negative
+            # returncode, which _play_file/_play_item/_worker treat as 'interrupted'.
+            try:
+                cur_proc.terminate()
+            except Exception:
+                pass
+        break
 
     device = _get_audio_device()
     cmd = ['ffmpeg', '-loglevel', 'error', '-i', 'pipe:0', '-f', 'alsa',

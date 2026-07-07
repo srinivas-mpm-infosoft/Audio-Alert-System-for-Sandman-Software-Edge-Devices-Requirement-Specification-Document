@@ -1,25 +1,22 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
-import { Activity, AlertTriangle, CheckCircle2, Clock, Volume2, Megaphone, ChevronDown, ChevronUp, Loader2, Radio, Upload } from "lucide-react";
+import React, { useState, useEffect, useCallback } from "react";
+import { Activity, AlertTriangle, CheckCircle2, Clock, Volume2, Radio, Cpu, ListChecks, Megaphone, Mic } from "lucide-react";
 import { useAlertsStore } from "../../store/useAlertsStore";
 import { useAlerts } from "./hooks/useAlerts";
 import { useCan } from "./hooks/useCan";
-import { acknowledgeAlert, broadcastManual } from "./api/alerts.api";
+import { acknowledgeAlert } from "./api/alerts.api";
 import { useToast } from "../../components/ToastContext";
 import { useAuthStore } from "../../store/useAuthStore";
+import { useDashboardEvents } from "./hooks/useDashboardEvents";
+import { useEdgeNodeStatus } from "./hooks/useEdgeNodeStatus";
+import { useSopExecutions } from "./hooks/useSopExecutions";
 import StatCard from "./components/StatCard";
 import AlertCard from "./components/AlertCard";
 import PriorityBadge from "./components/PriorityBadge";
 import AcknowledgeButton from "./components/AcknowledgeButton";
-import ConfirmDialog from "./components/ConfirmDialog";
-import ZonePicker from "./components/ZonePicker";
-import LanguagePicker from "./components/LanguagePicker";
 import EmptyState from "./components/EmptyState";
-import PagingPanel from "./components/PagingPanel";
-import AudioPreviewButton from "./components/AudioPreviewButton";
 import { PRIORITY_CONFIG } from "./utils/priorityConfig";
 import { PRIORITIES } from "./utils/constants";
-import { timeAgo, elapsedSeconds, formatDuration } from "./utils/formatters";
-import { getClips, uploadClip } from "./api/audio.api";
+import { elapsedSeconds, formatDuration } from "./utils/formatters";
 
 export default function LiveMonitor() {
   useAlerts();
@@ -27,44 +24,31 @@ export default function LiveMonitor() {
   const { alerts, activeCount, criticalCount, unackedCount, speakersUp, speakersTotal, nowPlaying, ackAlert } = useAlertsStore();
   const [elapsed, setElapsed] = useState(0);
   const [filters, setFilters] = useState({ priorities: [], zones: [], ackStatus: "" });
-  const [broadcastOpen, setBroadcastOpen] = useState(false);
-  const [broadcastZones, setBroadcastZones] = useState([]);
-  const [broadcastLang, setBroadcastLang] = useState("EN");
-  const [broadcastMsg, setBroadcastMsg] = useState("");
-  const [broadcastClipId, setBroadcastClipId] = useState("");
-  const [broadcastMode, setBroadcastMode] = useState("text");
-  const [broadcastBusy, setBroadcastBusy] = useState(false);
-  const [broadcastConfirm, setBroadcastConfirm] = useState(false);
-  const [clips, setClips] = useState([]);
-  const [clipUploading, setClipUploading] = useState(false);
-  const clipFileRef = useRef(null);
 
-  useEffect(() => {
-    getClips().then((r) => { if (r.ok) setClips(r.data); });
-  }, []);
+  const { devices: edgeNodes, onlineCount: edgeOnline, totalCount: edgeTotal } = useEdgeNodeStatus();
+  const { executions: sopExecutions } = useSopExecutions({ activeOnly: true });
+  const [activeBroadcast, setActiveBroadcast] = useState(null);
+  const [activePaging, setActivePaging] = useState(null);
 
-  const handleInlineUpload = async (file) => {
-    if (!file) return;
-    setClipUploading(true);
-    try {
-      const res = await uploadClip({ name: file.name.replace(/\.[^.]+$/, ""), language: broadcastLang }, file);
-      if (res.ok) {
-        setClips((c) => [res.data, ...c]);
-        setBroadcastClipId(res.data.id);
-        showToast(res.reused_existing_file ? "Identical audio already in the library — reusing it" : "File uploaded", "success");
-      } else {
-        showToast(res.error || "Upload failed", "error");
+  useDashboardEvents(useCallback((event) => {
+    if (event.type === "manual_broadcast") {
+      if (event.event === "start") {
+        setActiveBroadcast({ operator: event.operator, zoneIds: event.zone_ids, plantWide: event.plant_wide });
+      } else if (event.event === "end") {
+        setActiveBroadcast(null);
       }
-    } finally {
-      setClipUploading(false);
+    } else if (event.type === "paging_session") {
+      if (event.event === "start") {
+        setActivePaging({ operator: event.operator, zoneIds: event.zone_ids, plantWide: event.plant_wide });
+      } else if (event.event === "stop") {
+        setActivePaging(null);
+      }
     }
-  };
+  }, []));
 
   const showToast = useToast();
   const user = useAuthStore((s) => s.user);
   const canAck = useCan("aa.alerts.ack");
-  const canBroadcast = useCan("aa.broadcast.manual");
-  const canPage = useCan("aa.paging.use");
 
   // Live elapsed timer for now-playing card
   useEffect(() => {
@@ -88,32 +72,6 @@ export default function LiveMonitor() {
     }
   }, [ackAlert, showToast, user]);
 
-  const handleBroadcast = async () => {
-    setBroadcastConfirm(false);
-    setBroadcastBusy(true);
-    try {
-      const res = await broadcastManual({
-        zone_ids: broadcastZones,
-        language: broadcastLang,
-        message: broadcastMode === "text" ? broadcastMsg : undefined,
-        clip_id: broadcastMode === "clip" ? broadcastClipId : undefined,
-        audio_type: "voice",
-      });
-      if (res.ok) {
-        showToast("Broadcast sent successfully", "success");
-        setBroadcastMsg("");
-        setBroadcastZones([]);
-        setBroadcastOpen(false);
-      } else {
-        showToast("Broadcast failed", "error");
-      }
-    } catch {
-      showToast("Network error", "error");
-    } finally {
-      setBroadcastBusy(false);
-    }
-  };
-
   // Filter active alerts
   const activeAlerts = alerts.filter((a) => a.status === "Active");
   const filteredAlerts = activeAlerts.filter((a) => {
@@ -129,6 +87,26 @@ export default function LiveMonitor() {
 
   return (
     <div className="flex flex-col gap-5">
+      {/* Manual broadcast / live paging "currently active" banners */}
+      {activeBroadcast && (
+        <div className="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 flex items-center gap-2 text-sm text-indigo-800">
+          <Megaphone size={16} className="animate-pulse shrink-0" aria-hidden="true" />
+          <span>
+            Manual broadcast in progress by <strong>{activeBroadcast.operator || "an operator"}</strong>
+            {activeBroadcast.plantWide ? " — plant-wide" : activeBroadcast.zoneIds?.length ? ` — ${activeBroadcast.zoneIds.length} zone(s)` : ""}
+          </span>
+        </div>
+      )}
+      {activePaging && (
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 flex items-center gap-2 text-sm text-emerald-800">
+          <Mic size={16} className="animate-pulse shrink-0" aria-hidden="true" />
+          <span>
+            Live paging in progress by <strong>{activePaging.operator || "an operator"}</strong>
+            {activePaging.plantWide ? " — plant-wide" : activePaging.zoneIds?.length ? ` — ${activePaging.zoneIds.length} zone(s)` : ""}
+          </span>
+        </div>
+      )}
+
       {/* KPI Row */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
         <StatCard label="Active Alerts" value={activeCount} delta={2} icon={Activity} iconColor="#ef4444" iconBg="#fee2e2" />
@@ -223,126 +201,43 @@ export default function LiveMonitor() {
         </div>
       </div>
 
-      {/* Manual broadcast */}
-      {canBroadcast && (
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
-          <button
-            type="button"
-            onClick={() => setBroadcastOpen((o) => !o)}
-            className="w-full p-4 flex items-center justify-between text-left focus:outline-none focus:ring-2 focus:ring-indigo-400 rounded-xl"
-            aria-expanded={broadcastOpen}
-          >
-            <div className="flex items-center gap-2">
-              <Megaphone size={16} className="text-indigo-600" aria-hidden="true" />
-              <span className="font-semibold text-slate-700">Manual Broadcast</span>
-              <span className="text-xs text-slate-400">— broadcast a message to zone speakers now</span>
-            </div>
-            {broadcastOpen ? <ChevronUp size={16} className="text-slate-400" aria-hidden="true" /> : <ChevronDown size={16} className="text-slate-400" aria-hidden="true" />}
-          </button>
-
-          {broadcastOpen && (
-            <div className="px-4 pb-5 border-t border-slate-100 pt-4 flex flex-col gap-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <ZonePicker selected={broadcastZones} onChange={setBroadcastZones} label="Target Zones" />
-                <LanguagePicker value={broadcastLang} onChange={setBroadcastLang} label="Language" />
-              </div>
-
-              <div>
-                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block">Message Type</label>
-                <div className="flex gap-3">
-                  {[{ v: "text", l: "Type message" }, { v: "clip", l: "Use pre-recorded clip" }].map(({ v, l }) => (
-                    <label key={v} className="flex items-center gap-2 cursor-pointer">
-                      <input type="radio" name="bcast-mode" value={v} checked={broadcastMode === v} onChange={() => setBroadcastMode(v)} className="text-indigo-600" />
-                      <span className="text-sm text-slate-700">{l}</span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-
-              {broadcastMode === "text" ? (
-                <div>
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block">Message Text</label>
-                  <textarea
-                    rows={3}
-                    value={broadcastMsg}
-                    onChange={(e) => setBroadcastMsg(e.target.value)}
-                    placeholder="Type the message to broadcast…"
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 focus:border-zinc-400 text-slate-700 resize-none"
-                    aria-label="Broadcast message text"
-                  />
-                </div>
-              ) : (
-                <div className="flex flex-col gap-2">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block">Audio Clip</label>
-                  <div className="flex items-center gap-2">
-                    <select
-                      value={broadcastClipId}
-                      onChange={(e) => setBroadcastClipId(e.target.value)}
-                      className="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 text-slate-700"
-                      aria-label="Select audio clip"
-                    >
-                      <option value="">Select a clip…</option>
-                      {clips.filter((c) => !broadcastLang || c.language === broadcastLang).map((c) => (
-                        <option key={c.id} value={c.id}>{c.name} ({c.duration_sec}s)</option>
-                      ))}
-                    </select>
-                    {broadcastClipId && (
-                      <AudioPreviewButton payload={{ clip_id: broadcastClipId }} label="Preview" />
-                    )}
-                  </div>
-                  <div>
-                    <button
-                      type="button"
-                      onClick={() => clipFileRef.current?.click()}
-                      disabled={clipUploading}
-                      className="inline-flex items-center gap-1.5 text-xs font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50"
-                    >
-                      {clipUploading ? <Loader2 size={12} className="animate-spin" aria-hidden="true" /> : <Upload size={12} aria-hidden="true" />}
-                      {clipUploading ? "Uploading…" : "or upload a new MP3/WAV file"}
-                    </button>
-                    <input
-                      ref={clipFileRef} type="file" accept=".wav,.mp3,audio/*" className="hidden"
-                      onChange={(e) => { handleInlineUpload(e.target.files?.[0] || null); e.target.value = ""; }}
-                    />
-                  </div>
-                </div>
-              )}
-
-              <div className="flex justify-end gap-3 pt-2 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => setBroadcastOpen(false)}
-                  className="px-4 py-2 border border-slate-200 rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  disabled={broadcastBusy || (!broadcastMsg && !broadcastClipId) || !broadcastZones.length}
-                  onClick={() => setBroadcastConfirm(true)}
-                  className="inline-flex items-center gap-2 px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-semibold disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1"
-                >
-                  {broadcastBusy ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Megaphone size={14} aria-hidden="true" />}
-                  Broadcast Now
-                </button>
-              </div>
-            </div>
+      {/* Edge-node status + SOP-playing indicators */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <Cpu size={15} className="text-indigo-600" aria-hidden="true" />
+            <span className="text-sm font-semibold text-slate-700">{edgeOnline}/{edgeTotal} Edge Nodes Online</span>
+          </div>
+          {edgeNodes.filter((d) => d.status !== "online").length === 0 ? (
+            <p className="text-xs text-slate-400">All edge nodes online</p>
+          ) : (
+            <p className="text-xs text-slate-500 leading-relaxed">
+              Offline: {edgeNodes.filter((d) => d.status !== "online").map((d) => d.name).join(", ")}
+            </p>
           )}
         </div>
-      )}
 
-      {/* Live voice paging */}
-      {canPage && <PagingPanel />}
-
-      <ConfirmDialog
-        open={broadcastConfirm}
-        title="Confirm Broadcast"
-        message={`This will immediately play audio in ${broadcastZones.length} zone(s). Confirm you want to broadcast this message.`}
-        confirmLabel="Yes, Broadcast"
-        onConfirm={handleBroadcast}
-        onCancel={() => setBroadcastConfirm(false)}
-        variant="primary"
-      />
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <ListChecks size={15} className="text-indigo-600" aria-hidden="true" />
+            <span className="text-sm font-semibold text-slate-700">SOPs In Progress</span>
+          </div>
+          {sopExecutions.length === 0 ? (
+            <p className="text-xs text-slate-400">No SOPs currently running</p>
+          ) : (
+            <ul className="flex flex-col gap-1">
+              {sopExecutions.map((execution) => (
+                <li key={execution.id} className="text-xs text-slate-600 flex items-center justify-between gap-2">
+                  <span className="truncate">{execution.sop_name}</span>
+                  <span className="text-slate-400 shrink-0">
+                    Step {execution.current_step_number} of {execution.total_steps} — {execution.status.replace(/_/g, " ")}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

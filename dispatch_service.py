@@ -202,6 +202,7 @@ def _insert_log(row: dict):
 # Delivery — TTS text (via tts_server) or pre-recorded clip (direct to edge)
 # ============================================================
 
+# NOTE: conceptually mirrors edge-services/alert_poller.py's call_synthesise() — not shared code, keep in sync manually if either changes.
 def call_synthesise(text: str, lang_code: str, alert_id: int, zone_code: str,
                     alert_category: str, device_ip: str, alert_source: str = "") -> dict:
     """POST to tts_server /synthesise. Synchronous — translate+TTS+deliver."""

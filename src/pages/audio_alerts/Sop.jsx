@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Plus, Edit2, Trash2, Loader2, ListChecks, PlayCircle, History,
   CheckCircle2, XCircle, Clock, AlertTriangle, RotateCcw,
 } from "lucide-react";
 import { useSops } from "./hooks/useSops";
+import { useSopExecutions } from "./hooks/useSopExecutions";
 import { useCan } from "./hooks/useCan";
 import { useToast } from "../../components/ToastContext";
 import { useDashboardEvents } from "./hooks/useDashboardEvents";
@@ -35,7 +36,7 @@ function targetLabel(item) {
   return (item.zone_ids || []).join(", ") || "—";
 }
 
-function ExecutionCard({ execution, canAck, canRun, onAck, onCancel, busy }) {
+function ExecutionCard({ execution, steps, canAck, canRun, onAck, onCancel, busy }) {
   const [now, setNow] = useState(null);
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
@@ -47,6 +48,8 @@ function ExecutionCard({ execution, canAck, canRun, onAck, onCancel, busy }) {
   const timeoutSec = execution.ack_timeout_sec || 120;
   const isWaiting = execution.status === "WAITING_FOR_ACKNOWLEDGEMENT";
   const overdue = isWaiting && waitedSec > timeoutSec * 0.7;
+  const isStopped = execution.status === "CANCELLED" || execution.status === "FAILED";
+  const hasSteps = Array.isArray(steps) && steps.length > 0;
 
   return (
     <div className={`rounded-xl border-2 p-5 flex flex-col gap-3 ${overdue ? "border-amber-300 bg-amber-50/40" : "border-slate-200 bg-white"}`}>
@@ -57,15 +60,17 @@ function ExecutionCard({ execution, canAck, canRun, onAck, onCancel, busy }) {
             <span className={`inline-block text-[10px] font-bold px-2 py-0.5 rounded-full ${STATUS_STYLE[execution.status] ?? "bg-slate-100 text-slate-600"}`}>
               {execution.status.replace(/_/g, " ")}
             </span>
-            <span className="text-sm font-semibold text-slate-700">
-              Step {execution.current_step_number} of {execution.total_steps}
-            </span>
+            {!hasSteps && (
+              <span className="text-sm font-semibold text-slate-700">
+                Step {execution.current_step_number} of {execution.total_steps}
+              </span>
+            )}
           </div>
         </div>
         <div className="text-right text-xs text-slate-500">
           <p>Target: <strong className="text-slate-700">{targetLabel(execution)}</strong></p>
           <p>Started by: <strong className="text-slate-700">{execution.started_by}</strong></p>
-          {execution.retry_count > 0 && (
+          {!hasSteps && execution.retry_count > 0 && (
             <p className="flex items-center gap-1 justify-end text-amber-600 font-semibold mt-0.5">
               <RotateCcw size={11} aria-hidden="true" /> {execution.retry_count} retr{execution.retry_count === 1 ? "y" : "ies"}
             </p>
@@ -73,34 +78,117 @@ function ExecutionCard({ execution, canAck, canRun, onAck, onCancel, busy }) {
         </div>
       </div>
 
-      {execution.current_step && (
-        <p className="text-base italic text-slate-700 leading-relaxed">
-          "{execution.current_step.audio_mode === "clip" ? `[Clip: ${execution.current_step.title}]` : execution.current_step.message}"
-        </p>
+      {!hasSteps && (
+        <>
+          {execution.current_step && (
+            <p className="text-base italic text-slate-700 leading-relaxed">
+              "{execution.current_step.audio_mode === "clip" ? `[Clip: ${execution.current_step.title}]` : execution.current_step.message}"
+            </p>
+          )}
+
+          {isWaiting && (
+            <div className="flex items-center gap-2 text-xs text-slate-500">
+              <Clock size={13} aria-hidden="true" />
+              Waiting {waitedSec}s / {timeoutSec}s for acknowledgement
+              {overdue && <span className="text-amber-600 font-semibold">— replay imminent</span>}
+            </div>
+          )}
+
+          {canAck && isWaiting && (
+            <div className="flex gap-3 pt-1">
+              <button type="button" onClick={() => onAck(execution.id)} disabled={busy}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-semibold disabled:opacity-50">
+                <CheckCircle2 size={14} aria-hidden="true" /> Acknowledge
+              </button>
+            </div>
+          )}
+        </>
       )}
 
-      {isWaiting && (
-        <div className="flex items-center gap-2 text-xs text-slate-500">
-          <Clock size={13} aria-hidden="true" />
-          Waiting {waitedSec}s / {timeoutSec}s for acknowledgement
-          {overdue && <span className="text-amber-600 font-semibold">— replay imminent</span>}
+      {hasSteps && (
+        <div className="flex flex-col gap-1">
+          {steps.map((step, idx) => {
+            const stepNum = idx + 1;
+            const isDone = stepNum < execution.current_step_number;
+            const isCurrent = stepNum === execution.current_step_number;
+            const isSkipped = !isDone && !isCurrent && isStopped;
+            const stepLabel = step.title || (step.audio_mode === "clip" ? "Voice clip" : step.message) || `Step ${stepNum}`;
+
+            return (
+              <div
+                key={step.id ?? stepNum}
+                className={`flex items-start gap-3 rounded-lg px-3 py-2 ${
+                  isCurrent ? (overdue ? "bg-amber-50 border border-amber-200" : "bg-indigo-50/60 border border-indigo-100") : "border border-transparent"
+                }`}
+              >
+                <span className="mt-0.5 shrink-0">
+                  {isDone ? (
+                    <CheckCircle2 size={16} className="text-emerald-500" aria-hidden="true" />
+                  ) : isSkipped ? (
+                    <XCircle size={16} className="text-slate-400" aria-hidden="true" />
+                  ) : isCurrent ? (
+                    isWaiting
+                      ? <Clock size={16} className="text-amber-500" aria-hidden="true" />
+                      : <PlayCircle size={16} className="text-blue-500" aria-hidden="true" />
+                  ) : (
+                    <span className="inline-block w-4 h-4 rounded-full border-2 border-slate-200" aria-hidden="true" />
+                  )}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className={`text-sm font-medium ${
+                      isDone ? "text-slate-400 line-through" : isSkipped ? "text-slate-400" : isCurrent ? "text-slate-800" : "text-slate-500"
+                    }`}>
+                      Step {stepNum}: {stepLabel}
+                    </span>
+                    {isCurrent && (
+                      <span className={`inline-block text-[10px] font-bold px-2 py-0.5 rounded-full ${STATUS_STYLE[execution.status] ?? "bg-slate-100 text-slate-600"}`}>
+                        {execution.status.replace(/_/g, " ")}
+                      </span>
+                    )}
+                    {isCurrent && execution.retry_count > 0 && (
+                      <span className="inline-flex items-center gap-1 text-amber-600 text-[10px] font-semibold">
+                        <RotateCcw size={10} aria-hidden="true" /> {execution.retry_count} retr{execution.retry_count === 1 ? "y" : "ies"}
+                      </span>
+                    )}
+                    {isSkipped && <span className="text-[10px] text-slate-400 uppercase tracking-wide">Skipped</span>}
+                  </div>
+
+                  {isCurrent && execution.current_step && (
+                    <p className="text-sm italic text-slate-600 mt-1">
+                      "{execution.current_step.audio_mode === "clip" ? `[Clip: ${execution.current_step.title}]` : execution.current_step.message}"
+                    </p>
+                  )}
+
+                  {isCurrent && isWaiting && (
+                    <div className="flex items-center gap-2 text-xs text-slate-500 mt-1">
+                      <Clock size={12} aria-hidden="true" />
+                      Waiting {waitedSec}s / {timeoutSec}s for acknowledgement
+                      {overdue && <span className="text-amber-600 font-semibold">— replay imminent</span>}
+                    </div>
+                  )}
+
+                  {isCurrent && canAck && isWaiting && (
+                    <div className="pt-2">
+                      <button type="button" onClick={() => onAck(execution.id)} disabled={busy}
+                        className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-semibold disabled:opacity-50">
+                        <CheckCircle2 size={14} aria-hidden="true" /> Acknowledge
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 
-      {(isWaiting || execution.status === "PLAYING_STEP") && (
+      {canRun && (isWaiting || execution.status === "PLAYING_STEP") && (
         <div className="flex gap-3 pt-1">
-          {canAck && isWaiting && (
-            <button type="button" onClick={() => onAck(execution.id)} disabled={busy}
-              className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-semibold disabled:opacity-50">
-              <CheckCircle2 size={14} aria-hidden="true" /> Acknowledge
-            </button>
-          )}
-          {canRun && (
-            <button type="button" onClick={() => onCancel(execution.id)} disabled={busy}
-              className="inline-flex items-center gap-2 px-4 py-2 border border-red-200 text-red-600 hover:bg-red-50 rounded-lg text-sm font-semibold disabled:opacity-50">
-              <XCircle size={14} aria-hidden="true" /> Cancel
-            </button>
-          )}
+          <button type="button" onClick={() => onCancel(execution.id)} disabled={busy}
+            className="inline-flex items-center gap-2 px-4 py-2 border border-red-200 text-red-600 hover:bg-red-50 rounded-lg text-sm font-semibold disabled:opacity-50">
+            <XCircle size={14} aria-hidden="true" /> Cancel
+          </button>
         </div>
       )}
     </div>
@@ -121,42 +209,30 @@ export default function Sop() {
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [busyId, setBusyId] = useState(null);
 
-  const [executions, setExecutions] = useState([]);
-  const [execLoading, setExecLoading] = useState(false);
+  const { executions, loading: execLoading, reload: loadExecutions } = useSopExecutions({ activeOnly: true });
   const [historyExecutions, setHistoryExecutions] = useState([]);
   const [auditExpanded, setAuditExpanded] = useState(null);
   const [auditRows, setAuditRows] = useState([]);
 
-  useEffect(() => { load(); }, [load]);
+  const stepsBySopId = useMemo(
+    () => Object.fromEntries(sops.map((s) => [s.id, s.steps || []])),
+    [sops]
+  );
 
-  const loadExecutions = useCallback(async () => {
-    setExecLoading(true);
-    const res = await getSopExecutions(true);
-    if (res.ok) setExecutions(res.data);
-    setExecLoading(false);
-  }, []);
+  useEffect(() => { load(); }, [load]);
 
   const loadHistory = useCallback(async () => {
     const res = await getSopExecutions(false, 100);
     if (res.ok) setHistoryExecutions(res.data);
   }, []);
 
-  useEffect(() => { if (tab === "run") loadExecutions(); }, [tab, loadExecutions]);
   useEffect(() => { if (tab === "history") loadHistory(); }, [tab, loadHistory]);
 
-  // Live updates: the backend publishes a "sop_execution" event on every
-  // state transition (played/acknowledged/timeout-replay/completed/etc.)
-  // over the same real-time channel device-status uses — no polling needed
-  // while this tab is open.
+  // The shared hook already keeps `executions` in sync with the live
+  // "sop_execution" event stream — this is a small extra local subscription
+  // just to refresh the History tab while it's the one open.
   useDashboardEvents(useCallback((event) => {
     if (event.type !== "sop_execution") return;
-    setExecutions((prev) => {
-      const isTerminal = ["COMPLETED", "CANCELLED", "FAILED"].includes(event.status);
-      const exists = prev.some((e) => e.id === event.id);
-      if (isTerminal) return prev.filter((e) => e.id !== event.id);
-      if (exists) return prev.map((e) => e.id === event.id ? event : e);
-      return [event, ...prev];
-    });
     if (tab === "history") loadHistory();
   }, [tab, loadHistory]));
 
@@ -332,6 +408,7 @@ export default function Sop() {
                 {executions.map((execution) => (
                   <ExecutionCard
                     key={execution.id} execution={execution}
+                    steps={stepsBySopId[execution.sop_id] || null}
                     canAck={canAck} canRun={canRun}
                     onAck={handleAck} onCancel={handleCancel}
                     busy={busyId === execution.id}

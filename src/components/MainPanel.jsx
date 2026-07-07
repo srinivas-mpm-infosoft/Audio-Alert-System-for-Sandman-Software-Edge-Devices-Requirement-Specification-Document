@@ -28,7 +28,9 @@ const IO_SUB_TAB_MAP = {
 // aa-access removed — User Management is the top-level nav item now
 const AA_SUB_TAB_MAP = {
   "aa-live":      "live",
-  "aa-rules":     "rules",
+  "aa-broadcast": "broadcast",
+  "aa-paging":    "paging",
+  // "aa-rules":     "rules", // Rule Builder hidden from navigation for now
   "aa-schedule":  "schedule",
   "aa-sop":       "sop",
   "aa-audio":     "audio",

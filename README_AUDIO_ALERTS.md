@@ -5,9 +5,44 @@ Module: Audio Alert System for SandMan Software & Edge Devices
 
 ---
 
+## Project layout
+
+```
+main-gateway/
+├── backend/     — flask_backend.py + dispatch/heartbeat/scheduler/sop/mqtt services (port 8000)
+└── frontend/    — the Vite/React dashboard (this module lives under src/pages/audio_alerts/)
+edge-node/       — edge_node.py (port 5000, one per speaker), alert_poller.py (port 7000),
+                   tts_server.py (port 6000) — deployed on-device, not on the gateway
+```
+
+Run the Main Gateway backend:
+```bash
+cd main-gateway/backend
+python3 flask_backend.py        # http://localhost:8000
+```
+
+Run the Main Gateway frontend:
+```bash
+cd main-gateway/frontend
+npm install                     # first time only
+npm run dev                     # http://localhost:5173 (or `npm run build` for production)
+```
+
+Run an Edge Node (on each speaker device):
+```bash
+cd edge-node
+MQTT_ZONE_ID=<this-node's-zone-code> GATEWAY_URL=http://<gateway-host>:8000 python3 edge_node.py
+# Dashboard: http://<edge-node-host>:5000/dashboard
+```
+`MQTT_ZONE_ID` is optional for basic playback but required for the local dashboard's
+SOP status/acknowledge panel (it's how the node tells the gateway which zone it is).
+
+---
+
 ## Running with mock data (no backend required)
 
 ```bash
+cd main-gateway/frontend
 npm run dev
 ```
 
@@ -73,6 +108,16 @@ All responses follow the shape: `{ ok: boolean, data?: any, error?: string }`.
 | GET | `/audio-alerts/security` | Security settings |
 | PUT | `/audio-alerts/security` | Update security settings |
 
+Edge-node-facing endpoints below are called server-to-server by `edge-node/edge_node.py`'s
+own `/dashboard/*` proxy routes (never directly by a browser), so — like `/play` and
+`/acknowledge` on the edge node itself — they intentionally skip session login:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/audio-alerts/edge/alert-info?alert_id=` | Resolve a bare alert_id (from an edge node's `/health currently_playing`) into `{type, name, category, zone_code, started_at}` |
+| GET | `/audio-alerts/edge/sop-status?zone=` | Active SOP execution (if any) targeting this zone |
+| POST | `/audio-alerts/edge/sop-ack` | `{ execution_id, zone_code }` — acknowledge a SOP step from the edge node's own dashboard |
+
 ### Alert event payload (WebSocket / polling)
 
 ```json
@@ -122,9 +167,10 @@ Fine-grained roles (Process Engineer, Shift Supervisor, Maintenance Technician, 
 ## File structure
 
 ```
-src/pages/audio_alerts/
+main-gateway/frontend/src/pages/audio_alerts/
 ├── index.jsx            — wrapper (status strip + sub-tab router)
-├── LiveMonitor.jsx      — Tab 1: live alert queue, now-playing, broadcast
+├── LiveMonitor.jsx      — Tab 1: per-edge-node live state (online/offline, now playing,
+│                          alert type, playback status) + active alert queue
 ├── RuleBuilder.jsx      — Tab 2: rule list with CRUD
 ├── RuleForm.jsx         — Tab 2: full rule form
 ├── AudioConfig.jsx      — Tab 3: voice library, TTS, zones, volumes

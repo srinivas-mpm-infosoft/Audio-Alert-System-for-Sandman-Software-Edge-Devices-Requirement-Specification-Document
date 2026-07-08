@@ -46,8 +46,8 @@ from google import genai
 # USER CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-GEMINI_API_KEY     = os.getenv('GEMINI_API_KEY',     '')
-VOICEMAKER_API_KEY = os.getenv('VOICEMAKER_API_KEY', '')
+GEMINI_API_KEY     = os.getenv('GEMINI_API_KEY',     'AQ.Ab8RN6ISrPJlkW998A_GxYzCAKHyX6endPXvsXPNGQEaErDhtg')
+VOICEMAKER_API_KEY = os.getenv('VOICEMAKER_API_KEY', '8c19dc20-12aa-11ef-8d6e-49a96d622f69')
 
 TTS_GENDER    = 'male'
 AUDIO_SPEED   = 1.1
@@ -440,9 +440,12 @@ def voicemaker_tts(text: str, lang_code: str) -> bytes:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def deliver_to_edge(mp3: bytes, device_ip: str, alert_id: int,
-                    alert_category: str, lang_code: str) -> dict:
+                    alert_category: str, lang_code: str, zone_code: str = '') -> dict:
     """
     POST audio to edge node /play synchronously.
+    zone_code is unused here (HTTP addresses by device_ip) — accepted so
+    tts_server_mqtt.py can override this function with the same call
+    signature and address by zone_code (MQTT topic) instead.
     Returns receipt dict:
       edge_delivered : bool  — HTTP 200 received
       audio_queued   : bool  — edge node confirmed it queued the audio
@@ -482,8 +485,9 @@ def deliver_to_edge(mp3: bytes, device_ip: str, alert_id: int,
                 'critical_active': False, 'error': str(exc)}
 
 
-def acknowledge_on_edge(device_ip: str, alert_id: int) -> bool:
-    """POST /acknowledge to edge node. Returns True on success."""
+def acknowledge_on_edge(device_ip: str, alert_id: int, zone_code: str = '') -> bool:
+    """POST /acknowledge to edge node. Returns True on success.
+    zone_code unused here — see deliver_to_edge()'s docstring."""
     url = f"http://{device_ip}:{EDGE_NODE_PORT}{EDGE_NODE_ACKNOWLEDGE}"
     try:
         resp = requests.post(url, json={'alert_id': alert_id}, timeout=8)
@@ -612,10 +616,10 @@ def synthesise(text: str, lang_code: str,
 
     # 5. Deliver to edge node (SYNCHRONOUS)
     receipt = {'edge_delivered': False, 'audio_queued': False, 'critical_active': False}
-    if device_ip:
-        receipt = deliver_to_edge(mp3, device_ip, alert_id, alert_category, lang_code)
+    if device_ip or zone_code:
+        receipt = deliver_to_edge(mp3, device_ip, alert_id, alert_category, lang_code, zone_code=zone_code)
     else:
-        log.info(f"[Synth] No device_ip — skipping edge delivery for alert={alert_id}")
+        log.info(f"[Synth] No device_ip/zone_code — skipping edge delivery for alert={alert_id}")
 
     # 6. Local playback (non-blocking)
     if PLAY_LOCALLY and mp3:
@@ -729,17 +733,21 @@ def note_acknowledge():
     Called by alert_poller when cloud DB status changes to 'ack'.
     Forwards to edge node /acknowledge.
 
-    POST body: {"alert_id": 42, "device_ip": "10.42.0.50"}
+    POST body: {"alert_id": 42, "device_ip": "10.42.0.50", "zone_code": "z002"}
+    device_ip and zone_code are both accepted since alert_poller always sends
+    both — the HTTP version addresses by device_ip, the MQTT variant
+    (tts_server_mqtt.py) overrides acknowledge_on_edge to use zone_code instead.
     """
     body      = request.get_json(force=True, silent=True) or {}
     alert_id  = int(body.get('alert_id', 0))
     device_ip = str(body.get('device_ip', '')).strip()
+    zone_code = str(body.get('zone_code', '')).strip()
 
-    if not alert_id or not device_ip:
-        return jsonify({'error':'alert_id and device_ip required'}),400
+    if not alert_id or not (device_ip or zone_code):
+        return jsonify({'error':'alert_id and (device_ip or zone_code) required'}),400
 
-    log.info(f"[Ack] Forwarding acknowledge alert={alert_id} → {device_ip}")
-    ok = acknowledge_on_edge(device_ip, alert_id)
+    log.info(f"[Ack] Forwarding acknowledge alert={alert_id} → {device_ip or zone_code}")
+    ok = acknowledge_on_edge(device_ip, alert_id, zone_code=zone_code)
     return jsonify({'forwarded': ok, 'alert_id': alert_id, 'device_ip': device_ip})
 
 

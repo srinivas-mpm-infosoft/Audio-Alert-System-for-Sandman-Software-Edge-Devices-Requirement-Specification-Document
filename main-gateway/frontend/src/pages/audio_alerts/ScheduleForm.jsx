@@ -104,7 +104,9 @@ function toPayload(form) {
   };
 
   if (form.whenMode === "quick" || form.whenMode === "once") {
-    return { ...base, schedule_type: "once", scheduled_at: new Date(form.scheduled_at).toISOString() };
+    const parsed = form.scheduled_at ? new Date(form.scheduled_at) : null;
+    const valid = parsed && !Number.isNaN(parsed.getTime());
+    return { ...base, schedule_type: "once", scheduled_at: valid ? parsed.toISOString() : null };
   }
   if (form.whenMode === "hourly") {
     return { ...base, schedule_type: "hourly", interval_hours: form.interval_hours,

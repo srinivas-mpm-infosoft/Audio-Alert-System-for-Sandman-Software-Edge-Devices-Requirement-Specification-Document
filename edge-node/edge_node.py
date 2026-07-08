@@ -391,29 +391,15 @@ app = Flask(__name__)
 sock = Sock(app)
 
 
-@app.route('/play', methods=['POST'])
-def play():
+def _enqueue_play(alert_id: int, alert_category: str, lang_code: str, mp3_bytes: bytes) -> dict:
     """
-    Receive MP3 + metadata from TTS server.
-    Save to disk, enqueue for playback.
-
-    Multipart form:
-      audio          : MP3 file
-      alert_id       : int
-      alert_category : Critical | High | Normal | Low
-      lang_code      : str
+    Save audio to disk and enqueue for playback. Shared by the HTTP POST
+    /play route and edge_node_mqtt.py's MQTT play subscriber — both transports
+    end up in the exact same priority queue.
     """
-    if 'audio' not in request.files:
-        return jsonify({'error': 'audio file required'}), 400
-
-    mp3_bytes      = request.files['audio'].read()
-    alert_id       = int(request.form.get('alert_id', 0))
-    alert_category = request.form.get('alert_category', 'Normal').strip()
-    lang_code      = request.form.get('lang_code', 'EN').strip()
-    priority       = PRIORITY_MAP.get(alert_category, 2)
-
+    priority = PRIORITY_MAP.get(alert_category, 2)
     if not mp3_bytes:
-        return jsonify({'error': 'empty audio'}), 400
+        return {'queued': False, 'reason': 'empty audio'}
 
     # Save to disk (idempotent overwrite — harmless even if this turns out to
     # be a duplicate, since it's the same target filename either way)
@@ -423,7 +409,7 @@ def play():
         log.info(f"[Play] Saved {len(mp3_bytes)//1024}KB → {audio_path}")
     except Exception as e:
         log.error(f"[Play] Save failed: {e}")
-        return jsonify({'error': str(e)}), 500
+        return {'queued': False, 'reason': str(e)}
 
     item = {
         'alert_id':       alert_id,
@@ -445,33 +431,25 @@ def play():
     with _queue_lock:
         if any(i['alert_id']==alert_id and not i['acknowledged'] for i in _queue):
             log.info(f"[Queue] alert={alert_id} already queued")
-            return jsonify({'queued': False, 'reason': 'duplicate'}), 200
+            return {'queued': False, 'reason': 'duplicate', 'critical_active': bool(_unacked_criticals())}
         _queue.append(item); depth=len(_queue)
 
     log.info(f"[Queue] Enqueued alert={alert_id} cat={alert_category} "
              f"priority={priority}  depth={depth}")
 
-    return jsonify({
+    return {
         'queued':          True,
         'alert_id':        alert_id,
         'alert_category':  alert_category,
         'priority':        priority,
         'queue_depth':     depth,
         'critical_active': bool(_unacked_criticals()),
-    })
+    }
 
 
-@app.route('/acknowledge', methods=['POST'])
-def acknowledge():
-    """
-    Remove alert from queue and delete its audio file.
-    POST body: {"alert_id": 42}
-    """
-    body     = request.get_json(force=True, silent=True) or {}
-    alert_id = int(body.get('alert_id', 0))
-    if not alert_id:
-        return jsonify({'error': 'alert_id required'}), 400
-
+def _do_acknowledge(alert_id: int) -> dict:
+    """Remove alert from queue and delete its audio file. Shared by the
+    HTTP POST /acknowledge route and edge_node_mqtt.py's MQTT subscriber."""
     audio_path = None
     removed    = False
     with _queue_lock:
@@ -490,11 +468,51 @@ def acknowledge():
         try: os.unlink(audio_path)
         except Exception: pass
 
-    return jsonify({
+    return {
         'acknowledged':   removed,
         'alert_id':       alert_id,
         'critical_active': bool(_unacked_criticals()),
-    })
+    }
+
+
+@app.route('/play', methods=['POST'])
+def play():
+    """
+    Receive MP3 + metadata from TTS server.
+    Save to disk, enqueue for playback.
+
+    Multipart form:
+      audio          : MP3 file
+      alert_id       : int
+      alert_category : Critical | High | Normal | Low
+      lang_code      : str
+    """
+    if 'audio' not in request.files:
+        return jsonify({'error': 'audio file required'}), 400
+
+    mp3_bytes      = request.files['audio'].read()
+    alert_id       = int(request.form.get('alert_id', 0))
+    alert_category = request.form.get('alert_category', 'Normal').strip()
+    lang_code      = request.form.get('lang_code', 'EN').strip()
+
+    if not mp3_bytes:
+        return jsonify({'error': 'empty audio'}), 400
+
+    return jsonify(_enqueue_play(alert_id, alert_category, lang_code, mp3_bytes))
+
+
+@app.route('/acknowledge', methods=['POST'])
+def acknowledge():
+    """
+    Remove alert from queue and delete its audio file.
+    POST body: {"alert_id": 42}
+    """
+    body     = request.get_json(force=True, silent=True) or {}
+    alert_id = int(body.get('alert_id', 0))
+    if not alert_id:
+        return jsonify({'error': 'alert_id required'}), 400
+
+    return jsonify(_do_acknowledge(alert_id))
 
 
 @app.route('/increase-frequency', methods=['POST'])

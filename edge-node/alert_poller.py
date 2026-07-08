@@ -50,15 +50,18 @@ SERVER_PORT           = 7000
 
 LOCAL_DB = dict(
     host='localhost', port=3306,
-    user='gateway', password='Gateway@2025',
+    user='gateway', password='gateway',
     database='gateway', charset='utf8mb4', autocommit=True,
 )
+
+ 
 CLOUD_DB = dict(
-    host='zephyr.proxy.rlwy.net', port=43823,
-    user='root', password='IkzKDWWswgkbYMwHJrhPcbiRIuQCFOHa',
+    host='hayabusa.proxy.rlwy.net', port=47366,
+    user='root', password='KyfbQYIzmmLUClWQQsJkyHpCfJPuMENK',
     database='railway', charset='utf8mb4',
     connect_timeout=5, read_timeout=8, write_timeout=8, autocommit=True,
 )
+
 
 CLOUD_ALERTS_TABLE = 'alerts'
 NO_TRANSLATE_TABLE = 'app_no_translate_words'
@@ -138,9 +141,9 @@ def get_zone(conn, zone_code):
 def get_gateway_ip(conn, zone_id):
     with conn.cursor() as c:
         c.execute("SELECT address FROM devices WHERE zone_id=%s "
-                  "AND device_type='Gateway' ORDER BY id LIMIT 1",(zone_id,))
+                  "AND device_type IN ('Edge Node','Gateway') ORDER BY id LIMIT 1",(zone_id,))
         row=c.fetchone()
-        if row: log.info(f"[Device] Gateway: {row['address']}"); return row['address']
+        if row: log.info(f"[Device] {row['address']}"); return row['address']
         c.execute("SELECT address FROM devices WHERE zone_id=%s "
                   "AND address REGEXP '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+' "
                   "ORDER BY id LIMIT 1",(zone_id,))
@@ -198,9 +201,47 @@ CREATE TABLE IF NOT EXISTS {ALERT_LOGS_TABLE} (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
+_ALERT_DDL = f"""
+CREATE TABLE IF NOT EXISTS {CLOUD_ALERTS_TABLE} (
+    id                  INT AUTO_INCREMENT PRIMARY KEY,
+    created_at          DATETIME     DEFAULT CURRENT_TIMESTAMP,
+    updated_at          DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    alert_type          VARCHAR(16)  NOT NULL DEFAULT 'SI' COMMENT 'e.g. SI',
+    foundry_line_id     INT          NOT NULL,
+    zone_code           VARCHAR(64)  DEFAULT NULL COMMENT 'Zone this alert belongs to',
+    date                DATE         DEFAULT NULL,
+    shift               VARCHAR(8)   DEFAULT NULL COMMENT '1 / 2 / 3',
+    batch_pkey          INT          DEFAULT 0,
+    period_key          VARCHAR(32)  DEFAULT NULL COMMENT 'e.g. 2026-05-31_3',
+    si_score            FLOAT        DEFAULT NULL,
+    alert_level         VARCHAR(32)  DEFAULT NULL COMMENT 'e.g. !! WARNING',
+    root_cause          TEXT         DEFAULT NULL,
+    recommendation      TEXT         DEFAULT NULL,
+    params_json         JSON         DEFAULT NULL,
+    raw_values_json     JSON         DEFAULT NULL,
+    overall_status      VARCHAR(64)  DEFAULT NULL,
+    tolerance           FLOAT        DEFAULT NULL,
+    component_id        VARCHAR(64)  DEFAULT NULL,
+    group_name          VARCHAR(128) DEFAULT NULL,
+    batch_time          VARCHAR(64)  DEFAULT NULL,
+    deviations_json     JSON         DEFAULT NULL,
+    acknowledged        TINYINT(1)   NOT NULL DEFAULT 0,
+    acknowledged_at     DATETIME     DEFAULT NULL,
+
+    INDEX idx_foundry_line   (foundry_line_id),
+    INDEX idx_created_at     (created_at),
+    INDEX idx_acknowledged   (acknowledged),
+    INDEX idx_period_key     (period_key),
+    INDEX idx_zone_code      (zone_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+"""
+
 def ensure_alert_logs_table(conn):
     try:
-        with conn.cursor() as c: c.execute(_LOGS_DDL)
+        with conn.cursor() as c: 
+            c.execute(_LOGS_DDL)
+            c.execute(_ALERT_DDL)
         log.info(f"[Log] {ALERT_LOGS_TABLE} ready")
     except Exception as e: log.error(f"[Log] DDL failed: {e}")
 
@@ -605,6 +646,8 @@ def main():
 
     ensure_alert_logs_table(local_conn)
     no_translate.load(local_conn)
+
+    ensure_alert_logs_table(cloud_conn)
 
     try:
         r=requests.get(f"{TTS_SERVER_URL}/health",timeout=5)

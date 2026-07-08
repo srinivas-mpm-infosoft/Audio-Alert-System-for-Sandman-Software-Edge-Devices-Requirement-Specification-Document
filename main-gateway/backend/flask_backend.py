@@ -54,7 +54,7 @@ import events_bus
 # STATIC PATHS  (only BASE is fixed; everything else is configurable)
 # ============================================================
 
-BASE               = Path("/home/srinivas/ReComputer-r1125-Gateway-UI-All-test/Main Application")
+BASE               = Path("/home/recomputer/SSD-backup/Gateway-Backend/Main Application")
 STATIC             = BASE / "static"
 CONFIG_FILE        = BASE / "config.json"
 SYSTEM_CONFIG_FILE = BASE / "system_config.json"
@@ -183,7 +183,7 @@ DEFAULT_SYSTEM_CONFIG = {
     "app": {
         "server_host":          "0.0.0.0",
         "server_port":          8000,
-        "log_root":             "/home/srinivas/ReComputer-r1125-Gateway-UI-All-test/Main Application",
+        "log_root":             "/home/recomputer/logs",
         "session_lifetime_days": 365,
         "cookie_secure":        False,
         "cookie_samesite":      "Lax",
@@ -859,14 +859,10 @@ class ScheduledAnnouncement(db.Model):
     language         = Column(String(8), default="EN")
     zone_ids         = Column(JSON)             # list of zone_code strings
     plant_wide       = Column(Boolean, default=False)
-    schedule_type    = Column(String(16), default="once")   # once | daily | weekly | hourly | shift
+    schedule_type    = Column(String(16), default="once")   # once | daily | weekly
     scheduled_at     = Column(DateTime)                       # for "once"
     days_of_week     = Column(JSON)                           # for "weekly": [0..6], Mon=0
-    time_of_day      = Column(String(8))                      # "HH:MM" for daily/weekly; for "hourly" only the MM part is used (HH is ignored)
-    interval_hours   = Column(Integer)                        # for "hourly": fire every N hours
-    shift_name       = Column(String(64))                     # for "shift": key into the configured shifts dict
-    shift_event      = Column(String(16))                     # for "shift": start | end | offset
-    shift_offset_min = Column(Integer, default=0)             # for "shift" event=offset: minutes from shift start (negative = before)
+    time_of_day      = Column(String(8))                      # "HH:MM" for daily/weekly
     is_enabled       = Column(Boolean, default=True)
     next_run_at      = Column(DateTime)
     last_run_at      = Column(DateTime)
@@ -891,10 +887,6 @@ class ScheduledAnnouncement(db.Model):
             "scheduled_at":    self.scheduled_at.isoformat() if self.scheduled_at else None,
             "days_of_week":    self.days_of_week or [],
             "time_of_day":     self.time_of_day,
-            "interval_hours":  self.interval_hours,
-            "shift_name":      self.shift_name,
-            "shift_event":     self.shift_event,
-            "shift_offset_min": self.shift_offset_min or 0,
             "is_enabled":      bool(self.is_enabled),
             "next_run_at":     self.next_run_at.isoformat() if self.next_run_at else None,
             "last_run_at":     self.last_run_at.isoformat() if self.last_run_at else None,
@@ -2666,30 +2658,12 @@ def _apply_schedule_fields(sched, data):
     if "schedule_type" in data: sched.schedule_type = data["schedule_type"]
     if "days_of_week" in data: sched.days_of_week = data["days_of_week"] or []
     if "time_of_day" in data: sched.time_of_day = data["time_of_day"]
-    if "interval_hours" in data: sched.interval_hours = data["interval_hours"]
-    if "shift_name" in data: sched.shift_name = data["shift_name"]
-    if "shift_event" in data: sched.shift_event = data["shift_event"]
-    if "shift_offset_min" in data: sched.shift_offset_min = data["shift_offset_min"] or 0
     if "is_enabled" in data: sched.is_enabled = bool(data["is_enabled"])
     if "scheduled_at" in data and data["scheduled_at"]:
         sched.scheduled_at = datetime.fromisoformat(data["scheduled_at"])
     if "clip_id" in data:
         clip = AudioClip.query.filter_by(clip_code=data["clip_id"]).first() if data["clip_id"] else None
         sched.clip_id = clip.id if clip else None
-
-
-def _get_shifts_config():
-    sc = _read_sc()
-    return sc.get("shifts", DEFAULT_SYSTEM_CONFIG["shifts"])
-
-
-def _compute_schedule_next_run(sched):
-    return scheduler_service.compute_next_run(
-        sched.schedule_type, sched.scheduled_at, sched.days_of_week, sched.time_of_day,
-        interval_hours=sched.interval_hours, shift_name=sched.shift_name,
-        shift_event=sched.shift_event, shift_offset_min=sched.shift_offset_min,
-        shifts_config=_get_shifts_config(),
-    )
 
 
 @app.route("/audio-alerts/schedules", methods=["POST"])
@@ -2705,20 +2679,15 @@ def aa_schedules_post():
         return jsonify(ok=False, error="Either a message or a clip_id is required"), 400
     if not data.get("zone_ids") and not data.get("plant_wide"):
         return jsonify(ok=False, error="Select target zone(s) or plant-wide"), 400
-    if data.get("schedule_type") == "hourly" and not data.get("interval_hours"):
-        return jsonify(ok=False, error="Choose how often (every N hours)"), 400
-    if data.get("schedule_type") == "shift":
-        if not data.get("shift_name") or data["shift_name"] not in _get_shifts_config():
-            return jsonify(ok=False, error="Choose a valid shift"), 400
-        if data.get("shift_event") not in ("start", "end", "offset"):
-            return jsonify(ok=False, error="Choose when during the shift"), 400
 
     sched = ScheduledAnnouncement(
         schedule_code=_next_schedule_code(),
         created_by=_current_user().get("username", "unknown"),
     )
     _apply_schedule_fields(sched, data)
-    sched.next_run_at = _compute_schedule_next_run(sched)
+    sched.next_run_at = scheduler_service.compute_next_run(
+        sched.schedule_type, sched.scheduled_at, sched.days_of_week, sched.time_of_day,
+    )
     db.session.add(sched)
     db.session.commit()
     if sched.message and not sched.clip_id:
@@ -2740,7 +2709,9 @@ def aa_schedules_put(sched_id):
     before = sched.to_dict()
     data = request.json or {}
     _apply_schedule_fields(sched, data)
-    sched.next_run_at = _compute_schedule_next_run(sched)
+    sched.next_run_at = scheduler_service.compute_next_run(
+        sched.schedule_type, sched.scheduled_at, sched.days_of_week, sched.time_of_day,
+    )
     db.session.commit()
     if sched.message and not sched.clip_id and ("message" in data or "language" in data):
         dispatch_service.warm_cache_async(sched.message, sched.language or "EN",
@@ -2776,7 +2747,9 @@ def aa_schedules_enable(sched_id):
     if not sched:
         return jsonify(ok=False, error="Schedule not found"), 404
     sched.is_enabled = True
-    sched.next_run_at = _compute_schedule_next_run(sched)
+    sched.next_run_at = scheduler_service.compute_next_run(
+        sched.schedule_type, sched.scheduled_at, sched.days_of_week, sched.time_of_day,
+    )
     db.session.commit()
     return jsonify(ok=True, data=sched.to_dict())
 
@@ -4672,10 +4645,6 @@ def _run_migrations():
         "ALTER TABLE audio_clips    ADD COLUMN IF NOT EXISTS file_hash VARCHAR(64)",
         "ALTER TABLE alert_logs     ADD COLUMN IF NOT EXISTS audio_mode VARCHAR(16)",
         "ALTER TABLE alert_logs     ADD COLUMN IF NOT EXISTS announcement_type VARCHAR(24)",
-        "ALTER TABLE scheduled_announcements ADD COLUMN IF NOT EXISTS interval_hours INT",
-        "ALTER TABLE scheduled_announcements ADD COLUMN IF NOT EXISTS shift_name VARCHAR(64)",
-        "ALTER TABLE scheduled_announcements ADD COLUMN IF NOT EXISTS shift_event VARCHAR(16)",
-        "ALTER TABLE scheduled_announcements ADD COLUMN IF NOT EXISTS shift_offset_min INT DEFAULT 0",
         # New tables created automatically by SQLAlchemy — no ALTER needed
         # but we add them here as safety guards:
         """CREATE TABLE IF NOT EXISTS zone_language_configs (
@@ -4885,7 +4854,6 @@ if __name__ == "__main__":
     scheduler_service.start(
         app, db, ScheduledAnnouncement,
         dispatch_service.dispatch_broadcast, dispatch_service.all_zone_codes,
-        get_shifts_config=_get_shifts_config,
     )
     sop_service.start_timeout_checker(
         app, db, SopExecution, SopStepExecution,

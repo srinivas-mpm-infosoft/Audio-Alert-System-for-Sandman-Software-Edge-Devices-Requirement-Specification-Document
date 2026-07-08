@@ -121,7 +121,7 @@ def resolve_targets(zone_codes: list) -> list:
     """
     zone_codes -> [{zone_code, zone_name, device_ip}, ...] for zones that
     have a reachable device configured. Mirrors alert_poller.get_gateway_ip's
-    'Gateway device_type first, else any dotted-IP address' fallback.
+    'Edge Node/Gateway device_type first, else any dotted-IP address' fallback.
     """
     if not zone_codes:
         return []
@@ -136,7 +136,7 @@ def resolve_targets(zone_codes: list) -> list:
             zones = c.fetchall()
             for z in zones:
                 c.execute(
-                    "SELECT address FROM devices WHERE zone_id=%s AND device_type='Gateway' "
+                    "SELECT address FROM devices WHERE zone_id=%s AND device_type IN ('Edge Node','Gateway') "
                     "ORDER BY id LIMIT 1", (z["id"],),
                 )
                 row = c.fetchone()

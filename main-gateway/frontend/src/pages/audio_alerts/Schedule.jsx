@@ -7,23 +7,15 @@ import ConfirmDialog from "./components/ConfirmDialog";
 import EmptyState from "./components/EmptyState";
 import ScheduleForm from "./ScheduleForm";
 import { formatTimestamp } from "./utils/formatters";
+import { scheduleSummary } from "./utils/scheduleSummary";
+import { getShiftTimes } from "./api/config.api";
+import { getZones } from "./api/devices.api";
 
 const STATUS_STYLE = {
   success: "text-emerald-700 bg-emerald-50",
   partial: "text-amber-700 bg-amber-50",
   failed:  "text-red-700 bg-red-50",
 };
-
-function scheduleSummary(s) {
-  if (s.schedule_type === "once") return s.scheduled_at ? `Once — ${formatTimestamp(s.scheduled_at)}` : "Once";
-  if (s.schedule_type === "daily") return `Daily @ ${s.time_of_day || "—"}`;
-  if (s.schedule_type === "weekly") {
-    const names = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
-    const days = (s.days_of_week || []).map((d) => names[d]).join(", ");
-    return `Weekly (${days || "—"}) @ ${s.time_of_day || "—"}`;
-  }
-  return s.schedule_type;
-}
 
 export default function Schedule() {
   const { schedules, loading, load, create, update, remove, enable, disable } = useSchedules();
@@ -34,8 +26,20 @@ export default function Schedule() {
   const [editTarget, setEditTarget] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [busyId, setBusyId] = useState(null);
+  const [shiftsConfig, setShiftsConfig] = useState(null);
+  const [zoneNames, setZoneNames] = useState({});
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    getShiftTimes().then((r) => { if (r.ok) setShiftsConfig(r.data); });
+    getZones().then((r) => {
+      if (r.ok) setZoneNames(Object.fromEntries(r.data.map((z) => [z.id, z.name])));
+    });
+  }, []);
+
+  const targetLabel = (s) => s.plant_wide
+    ? "Plant-wide"
+    : (s.zone_ids || []).map((id) => zoneNames[id] || id).join(", ") || "—";
 
   const handleSave = async (payload) => {
     const res = editTarget ? await update(editTarget.id, payload) : await create(payload);
@@ -123,9 +127,9 @@ export default function Schedule() {
                       <span className="truncate block" title={s.name}>{s.name}</span>
                     </td>
                     <td className="px-4 py-3 text-slate-500 text-xs max-w-[160px]">
-                      <span className="truncate block">{s.plant_wide ? "Plant-wide" : (s.zone_ids || []).join(", ") || "—"}</span>
+                      <span className="truncate block">{targetLabel(s)}</span>
                     </td>
-                    <td className="px-4 py-3 text-slate-600 text-xs">{scheduleSummary(s)}</td>
+                    <td className="px-4 py-3 text-slate-600 text-xs max-w-[280px]">{scheduleSummary(s, shiftsConfig)}</td>
                     <td className="px-4 py-3 text-slate-500 text-xs">
                       {s.next_run_at ? formatTimestamp(s.next_run_at) : "—"}
                     </td>
@@ -140,10 +144,11 @@ export default function Schedule() {
                       {canEdit ? (
                         <button
                           type="button" onClick={() => handleToggle(s)} disabled={busyId === s.id}
-                          className="text-slate-400 hover:text-indigo-600 disabled:opacity-40 transition-colors"
+                          className={`inline-flex items-center gap-1.5 text-xs font-semibold transition-colors disabled:opacity-40 ${s.is_enabled ? "text-emerald-600 hover:text-emerald-700" : "text-slate-400 hover:text-indigo-600"}`}
                           aria-label={s.is_enabled ? "Disable schedule" : "Enable schedule"}
                         >
-                          {busyId === s.id ? <Loader2 size={16} className="animate-spin" /> : s.is_enabled ? <ToggleRight size={20} className="text-emerald-600" /> : <ToggleLeft size={20} />}
+                          {busyId === s.id ? <Loader2 size={16} className="animate-spin" /> : s.is_enabled ? <ToggleRight size={20} /> : <ToggleLeft size={20} />}
+                          {s.is_enabled ? "Enabled" : "Disabled"}
                         </button>
                       ) : (
                         <span className={s.is_enabled ? "text-emerald-600 text-xs font-semibold" : "text-slate-400 text-xs"}>{s.is_enabled ? "Enabled" : "Disabled"}</span>

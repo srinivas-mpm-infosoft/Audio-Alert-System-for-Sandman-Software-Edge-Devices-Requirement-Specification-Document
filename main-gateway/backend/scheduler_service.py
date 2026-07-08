@@ -23,7 +23,14 @@ _CHECK_INTERVAL_SEC = 20
 _started = False
 
 
-def compute_next_run(schedule_type, scheduled_at, days_of_week, time_of_day, after=None):
+def _hm_to_min(hhmm):
+    hh, mm = [int(x) for x in str(hhmm).split(":")[:2]]
+    return hh * 60 + mm
+
+
+def compute_next_run(schedule_type, scheduled_at, days_of_week, time_of_day, after=None,
+                     interval_hours=None, shift_name=None, shift_event=None,
+                     shift_offset_min=None, shifts_config=None):
     """
     Return the next datetime this schedule should fire, or None if it has
     nothing left to schedule (e.g. a one-off that already ran).
@@ -32,6 +39,42 @@ def compute_next_run(schedule_type, scheduled_at, days_of_week, time_of_day, aft
 
     if schedule_type == "once":
         return scheduled_at if (scheduled_at and scheduled_at > after) else None
+
+    if schedule_type == "shift":
+        # Resolve to a plain clock time, then fall through to "daily" —
+        # "next occurrence of this HH:MM" is the same computation whether
+        # that time happens to be a shift boundary or not. This also makes
+        # overnight shifts (end < start) work for free: the target minute
+        # wraps via modulo, and "next occurrence of a wall-clock time" needs
+        # no special-casing for which calendar day the shift logically began.
+        shift = (shifts_config or {}).get(shift_name)
+        if not shift:
+            return None
+        try:
+            start_min = _hm_to_min(shift["start"])
+            end_min = _hm_to_min(shift["end"])
+        except Exception:
+            return None
+        if shift_event == "end":
+            target_min = end_min
+        else:  # "start" (offset 0) or "offset" (signed minutes from start)
+            target_min = (start_min + (shift_offset_min or 0)) % 1440
+        time_of_day = f"{target_min // 60:02d}:{target_min % 60:02d}"
+        schedule_type = "daily"
+
+    if schedule_type == "hourly":
+        try:
+            _, minute = [int(x) for x in str(time_of_day).split(":")[:2]]
+            interval = max(1, min(int(interval_hours), 24))
+        except Exception:
+            return None
+        hours_today = range(0, 24, interval)
+        for h in hours_today:
+            candidate = after.replace(hour=h, minute=minute, second=0, microsecond=0)
+            if candidate > after:
+                return candidate
+        tomorrow = after + timedelta(days=1)
+        return tomorrow.replace(hour=hours_today[0], minute=minute, second=0, microsecond=0)
 
     if not time_of_day:
         return None
@@ -61,9 +104,10 @@ def compute_next_run(schedule_type, scheduled_at, days_of_week, time_of_day, aft
     return None
 
 
-def _run_due(app, db, ScheduledAnnouncement, dispatch_broadcast, all_zone_codes):
+def _run_due(app, db, ScheduledAnnouncement, dispatch_broadcast, all_zone_codes, get_shifts_config=None):
     with app.app_context():
         now = datetime.now()
+        shifts_config = get_shifts_config() if get_shifts_config else {}
         due = ScheduledAnnouncement.query.filter(
             ScheduledAnnouncement.is_enabled.is_(True),
             ScheduledAnnouncement.next_run_at.isnot(None),
@@ -71,6 +115,20 @@ def _run_due(app, db, ScheduledAnnouncement, dispatch_broadcast, all_zone_codes)
         ).all()
         for sched in due:
             try:
+                # Claim this run BEFORE dispatching: advance next_run_at (and
+                # disable one-offs) and commit first. If dispatch_broadcast
+                # then hangs or raises, the schedule is already moved past
+                # "due" and won't be picked up and re-fired on the next tick.
+                sched.next_run_at = compute_next_run(
+                    sched.schedule_type, sched.scheduled_at, sched.days_of_week, sched.time_of_day,
+                    after=now, interval_hours=sched.interval_hours, shift_name=sched.shift_name,
+                    shift_event=sched.shift_event, shift_offset_min=sched.shift_offset_min,
+                    shifts_config=shifts_config,
+                )
+                if sched.schedule_type == "once":
+                    sched.is_enabled = False
+                db.session.commit()
+
                 zone_codes = list(sched.zone_ids or [])
                 if sched.plant_wide:
                     zone_codes = all_zone_codes()
@@ -103,29 +161,24 @@ def _run_due(app, db, ScheduledAnnouncement, dispatch_broadcast, all_zone_codes)
 
                 sched.last_run_at = now
                 sched.last_run_status = status
-                sched.next_run_at = compute_next_run(
-                    sched.schedule_type, sched.scheduled_at, sched.days_of_week,
-                    sched.time_of_day, after=now,
-                )
-                if sched.schedule_type == "once":
-                    sched.is_enabled = False
                 db.session.commit()
             except Exception as e:
                 log.error("[Scheduler] Failed running '%s': %s", sched.name, e)
                 db.session.rollback()
 
 
-def _loop(app, db, ScheduledAnnouncement, dispatch_broadcast, all_zone_codes):
+def _loop(app, db, ScheduledAnnouncement, dispatch_broadcast, all_zone_codes, get_shifts_config=None):
     log.info("[Scheduler] Started — checking every %ss", _CHECK_INTERVAL_SEC)
     while True:
         try:
-            _run_due(app, db, ScheduledAnnouncement, dispatch_broadcast, all_zone_codes)
+            _run_due(app, db, ScheduledAnnouncement, dispatch_broadcast, all_zone_codes, get_shifts_config)
         except Exception as e:
             log.error("[Scheduler] loop error: %s", e)
         time.sleep(_CHECK_INTERVAL_SEC)
 
 
-def start(app, db, ScheduledAnnouncement, dispatch_broadcast, all_zone_codes, interval_sec: int = 20):
+def start(app, db, ScheduledAnnouncement, dispatch_broadcast, all_zone_codes,
+         interval_sec: int = 20, get_shifts_config=None):
     """Call once at app startup."""
     global _CHECK_INTERVAL_SEC, _started
     if _started:
@@ -134,6 +187,6 @@ def start(app, db, ScheduledAnnouncement, dispatch_broadcast, all_zone_codes, in
     _started = True
     threading.Thread(
         target=_loop,
-        args=(app, db, ScheduledAnnouncement, dispatch_broadcast, all_zone_codes),
+        args=(app, db, ScheduledAnnouncement, dispatch_broadcast, all_zone_codes, get_shifts_config),
         daemon=True, name="scheduler",
     ).start()

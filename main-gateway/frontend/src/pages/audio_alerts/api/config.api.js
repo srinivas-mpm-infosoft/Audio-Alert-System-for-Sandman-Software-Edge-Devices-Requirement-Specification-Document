@@ -15,6 +15,11 @@ export async function getZoneTypes() {
   return res.json();
 }
 
+export async function getShiftTimes() {
+  const res = await fetch(`${targetUrl}/audio-alerts/shift-times`, { credentials: "include" });
+  return res.json();
+}
+
 export async function saveAppSettings(data) {
   const res = await fetch(`${targetUrl}/audio-alerts/config/app-settings`, {
     method: "PUT", credentials: "include",

@@ -28,6 +28,14 @@ def _hm_to_min(hhmm):
     return hh * 60 + mm
 
 
+def _naive(dt):
+    """Strip tzinfo so comparisons against datetime.now() (naive) never blow
+    up with 'can't compare offset-naive and offset-aware datetimes'."""
+    if dt is not None and dt.tzinfo is not None:
+        return dt.astimezone().replace(tzinfo=None)
+    return dt
+
+
 def compute_next_run(schedule_type, scheduled_at, days_of_week, time_of_day, after=None,
                      interval_hours=None, shift_name=None, shift_event=None,
                      shift_offset_min=None, shifts_config=None):
@@ -35,7 +43,8 @@ def compute_next_run(schedule_type, scheduled_at, days_of_week, time_of_day, aft
     Return the next datetime this schedule should fire, or None if it has
     nothing left to schedule (e.g. a one-off that already ran).
     """
-    after = after or datetime.now()
+    after = _naive(after) or datetime.now()
+    scheduled_at = _naive(scheduled_at)
 
     if schedule_type == "once":
         return scheduled_at if (scheduled_at and scheduled_at > after) else None

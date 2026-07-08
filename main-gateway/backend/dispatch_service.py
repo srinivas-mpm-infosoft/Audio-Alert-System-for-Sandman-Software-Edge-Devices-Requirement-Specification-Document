@@ -83,8 +83,8 @@ def init(db_cfg: dict, tts_server_url: Optional[str] = None, edge_node_port: Opt
     _DB_CFG = dict(
         host="localhost",
         port=db_cfg.get("port", 3306),
-        user=db_cfg.get("user", "gateway"),
-        password=db_cfg.get("password", "gateway"),
+        user=db_cfg.get("user", "python"),
+        password=db_cfg.get("password", "python"),
         database=db_cfg.get("name", "gateway"),
         charset="utf8mb4",
         autocommit=True,
@@ -157,6 +157,17 @@ def resolve_targets(zone_codes: list) -> list:
     finally:
         conn.close()
     return out
+
+
+def resolve_target(zone_code: str) -> Optional[dict]:
+    """Single-zone convenience wrapper around resolve_targets().
+    Returns {zone_code, zone_name, device_ip} or None if the zone doesn't
+    exist / has no device configured. Used by callers (e.g. Test Fire) that
+    only have a zone_code and need the device_ip looked up from the DB."""
+    if not zone_code:
+        return None
+    targets = resolve_targets([zone_code])
+    return targets[0] if targets else None
 
 
 def all_zone_codes() -> list:
@@ -295,12 +306,26 @@ def warm_cache_async(text: str, language: str, alert_source: str = "Cache Warm")
     _pool.submit(warm_cache, text, language, alert_source)
 
 
-def send_test_tone(device_ip: str) -> dict:
-    """Deliver a short spoken test phrase to one device (used by 'Test Fire')."""
+def send_test_tone(zone_code: str) -> dict:
+    """
+    Deliver a short spoken test phrase to one zone (used by 'Test Fire').
+
+    Takes a zone_code — NOT a raw device_ip — and resolves the target
+    device from the DB itself via resolve_target(). This mirrors the
+    tts_server.py zone_id fix: the caller should never be responsible for
+    already knowing the device's IP, since a stale/blank IP silently
+    produces a broken "http://:5000/play" URL downstream.
+    """
+    target = resolve_target(zone_code)
+    if not target or not target.get("device_ip"):
+        log.error("[Dispatch] send_test_tone: no device configured for zone_code=%s", zone_code)
+        return {"ok": False, "edge_delivered": False, "audio_queued": False,
+                "error": f"No device configured for zone '{zone_code}'"}
+
     test_id = BROADCAST_ID_BASE + int(time.time() * 1000) % 90_000_000
     return call_synthesise(
         "This is a test announcement from the audio alert system.",
-        "EN", test_id, "", "Low", device_ip, alert_source="Test Fire",
+        "EN", test_id, zone_code, "Low", target["device_ip"], alert_source="Test Fire",
     )
 
 

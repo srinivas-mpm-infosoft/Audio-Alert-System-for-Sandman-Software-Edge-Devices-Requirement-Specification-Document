@@ -998,8 +998,9 @@ class SopExecution(db.Model):
     execution_code      = Column(String(32), unique=True, nullable=False)
     sop_id              = Column(Integer, ForeignKey("sops.id", ondelete="CASCADE"), nullable=False)
     sop_name            = Column(String(255))
-    status              = Column(String(24), default="NOT_STARTED")
+    status              = Column(String(32), default="NOT_STARTED")
     # NOT_STARTED | PLAYING_STEP | WAITING_FOR_ACKNOWLEDGEMENT | COMPLETED | CANCELLED | FAILED
+    # (WAITING_FOR_ACKNOWLEDGEMENT is 27 chars — column must stay >= 27; was VARCHAR(24) and truncation-rejected it)
     current_step_index  = Column(Integer, default=0)
     retry_count         = Column(Integer, default=0)
     zone_ids            = Column(JSON)
@@ -2605,22 +2606,38 @@ def aa_dashboard_ws(ws):
         ws.close(reason=1008, message="Unauthorized")
         return
 
+    # events_bus fans out from whichever background thread published the
+    # event (heartbeat_service, dispatch_service's thread pool, scheduler_service,
+    # sop_service) — without this lock, two threads calling ws.send() on the
+    # same connection at once interleave their frame writes and corrupt the
+    # WebSocket stream (surfaces to the browser as "Invalid frame header").
+    send_lock = threading.Lock()
+
     def _on_event(event):
         try:
-            ws.send(json.dumps(event))
+            with send_lock:
+                ws.send(json.dumps(event))
         except Exception:
             pass
 
     events_bus.subscribe(_on_event)
     try:
-        ws.send(json.dumps({"type": "connected"}))
+        with send_lock:
+            ws.send(json.dumps({"type": "connected"}))
         while True:
             try:
                 msg = ws.receive(timeout=30)
             except ConnectionClosed:
                 break
             if msg is None:
-                break
+                # receive() returns None on a plain timeout too, not just on
+                # disconnect — this channel is receive-only from the browser
+                # (no client->server messages expected), so it times out
+                # every 30s by design. Only treat it as closed once the
+                # connection itself has actually dropped.
+                if not ws.connected:
+                    break
+                continue
             # No client->server messages expected; connection is receive-only
             # from the browser's point of view (keepalive pings are fine to ignore).
     except Exception as e:
@@ -2660,7 +2677,14 @@ def _apply_schedule_fields(sched, data):
     if "time_of_day" in data: sched.time_of_day = data["time_of_day"]
     if "is_enabled" in data: sched.is_enabled = bool(data["is_enabled"])
     if "scheduled_at" in data and data["scheduled_at"]:
-        sched.scheduled_at = datetime.fromisoformat(data["scheduled_at"])
+        dt = datetime.fromisoformat(data["scheduled_at"])
+        if dt.tzinfo is not None:
+            # Everything else in this app (datetime.now(), compute_next_run's
+            # `after` default) is naive/local-time. A tz-aware value here
+            # would blow up the first `scheduled_at > after` comparison with
+            # "can't compare offset-naive and offset-aware datetimes".
+            dt = dt.astimezone().replace(tzinfo=None)
+        sched.scheduled_at = dt
     if "clip_id" in data:
         clip = AudioClip.query.filter_by(clip_code=data["clip_id"]).first() if data["clip_id"] else None
         sched.clip_id = clip.id if clip else None
@@ -4645,6 +4669,10 @@ def _run_migrations():
         "ALTER TABLE audio_clips    ADD COLUMN IF NOT EXISTS file_hash VARCHAR(64)",
         "ALTER TABLE alert_logs     ADD COLUMN IF NOT EXISTS audio_mode VARCHAR(16)",
         "ALTER TABLE alert_logs     ADD COLUMN IF NOT EXISTS announcement_type VARCHAR(24)",
+        # sop_executions.status was originally VARCHAR(24), but
+        # "WAITING_FOR_ACKNOWLEDGEMENT" is 27 chars — widen the already-created
+        # column (MODIFY COLUMN is safe to re-run; no-op once already 32).
+        "ALTER TABLE sop_executions MODIFY COLUMN status VARCHAR(32)",
         # New tables created automatically by SQLAlchemy — no ALTER needed
         # but we add them here as safety guards:
         """CREATE TABLE IF NOT EXISTS zone_language_configs (
@@ -4865,4 +4893,10 @@ if __name__ == "__main__":
         broker_port=_svc_cfg.get("mqtt_broker_port", 1883),
     )
 
-    app.run("0.0.0.0", port=8000)
+    # threaded=True is required for the flask-sock WebSocket routes
+    # (/audio-alerts/dashboard/ws, /audio-alerts/paging/ws): each open WS
+    # connection blocks its handling thread for the connection's whole
+    # lifetime, and without threading the dev server can't hold that open
+    # while still serving other requests — every other app.run() in this
+    # codebase (edge_node.py, tts_server.py) already sets this.
+    app.run("0.0.0.0", port=8000, threaded=True)

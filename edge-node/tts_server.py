@@ -39,6 +39,8 @@ from typing import Optional, List
 
 import requests
 import websocket
+import pymysql
+import pymysql.cursors
 from flask import Flask, request, jsonify, Response
 from google import genai
 
@@ -60,6 +62,13 @@ EDGE_NODE_PORT        = 5000
 EDGE_NODE_PLAY        = '/play'
 EDGE_NODE_ACKNOWLEDGE = '/acknowledge'
 EDGE_TIMEOUT_SEC      = 10   # seconds to wait for edge /play response
+
+# --- MariaDB (zones / devices lookup) ---
+DB_HOST     = os.getenv('DB_HOST',     'localhost')
+DB_PORT     = int(os.getenv('DB_PORT', '3306'))
+DB_USER     = os.getenv('DB_USER',     'gateway')
+DB_PASSWORD = os.getenv('DB_PASSWORD', 'gateway')
+DB_NAME     = os.getenv('DB_NAME',     'gateway')
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PATHS
@@ -436,6 +445,68 @@ def voicemaker_tts(text: str, lang_code: str) -> bytes:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# MariaDB — resolve zone_id → language + edge node IP
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_db_connection():
+    return pymysql.connect(
+        host=DB_HOST, port=DB_PORT,
+        user=DB_USER, password=DB_PASSWORD,
+        database=DB_NAME,
+        cursorclass=pymysql.cursors.DictCursor,
+        connect_timeout=5,
+    )
+
+
+def resolve_zone(zone_id: int) -> Optional[dict]:
+    """
+    Given a zone_id (zones.id), look up:
+      - default_language  (zones.default_language)   → lang_code
+      - address            (devices.address)          → device_ip
+        (the Edge Node row whose devices.zone_id == zone_id)
+
+    Returns {'lang_code','device_ip','zone_code'} or None if not found.
+    """
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT zone_code, default_language FROM zones WHERE id = %s",
+                    (zone_id,)
+                )
+                zone = cur.fetchone()
+                if not zone:
+                    log.error(f"[DB] zone_id={zone_id} not found in zones table")
+                    return None
+
+                cur.execute(
+                    "SELECT address, status FROM devices "
+                    "WHERE zone_id = %s AND device_type = 'Edge Node' "
+                    "ORDER BY (status = 'online') DESC, updated_at DESC LIMIT 1",
+                    (zone_id,)
+                )
+                device = cur.fetchone()
+                if not device or not device.get('address'):
+                    log.error(f"[DB] No Edge Node device found for zone_id={zone_id}")
+                    return None
+                if device.get('status') != 'online':
+                    log.warning(f"[DB] Edge Node for zone_id={zone_id} is status="
+                                f"{device.get('status')} — sending anyway")
+
+                return {
+                    'lang_code': (zone.get('default_language') or 'EN').upper(),
+                    'device_ip': device['address'],
+                    'zone_code': zone.get('zone_code') or '',
+                }
+        finally:
+            conn.close()
+    except Exception as exc:
+        log.error(f"[DB] resolve_zone({zone_id}) failed: {exc}")
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Edge node delivery  (SYNCHRONOUS — blocks until edge responds)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -653,6 +724,7 @@ def synthesise_endpoint():
     POST body (JSON):
     {
       "text":               "Sand burn loss is high",
+      "zone_id":            2,
       "lang_code":          "TE",
       "alert_id":           42,
       "alert_category":     "Critical",
@@ -661,6 +733,12 @@ def synthesise_endpoint():
       "no_translate_words": ["Sand","Burn"],
       "alert_source":       "SCADA"
     }
+
+    zone_id (new): if supplied, tts_server looks up the zone's
+    default_language and the matching Edge Node's IP address from the
+    MariaDB `gateway` DB (tables: zones, devices) and uses those for
+    lang_code / device_ip UNLESS the caller explicitly supplied their own
+    lang_code / device_ip in the body (those always take priority).
 
     Returns MP3 audio/mpeg.
 
@@ -685,12 +763,35 @@ def synthesise_endpoint():
         return jsonify({'error':'Expected JSON object'}),400
 
     text           = (body.get('text')           or '').strip()
-    lang_code      = (body.get('lang_code')       or 'EN').upper().strip()
     nt_words       = body.get('no_translate_words') or []
     alert_id       = int(body.get('alert_id')     or 0)
     zone_code      = str(body.get('zone_code')    or '')
     alert_category = str(body.get('alert_category') or 'Normal').strip()
-    device_ip      = str(body.get('device_ip')    or '').strip()
+
+    lang_code_in = (body.get('lang_code') or '').upper().strip()
+    device_ip_in = (body.get('device_ip') or '').strip()
+    zone_id      = body.get('zone_id')
+
+    lang_code = lang_code_in or 'EN'
+    device_ip = device_ip_in
+
+    if zone_id not in (None, ''):
+        try:
+            zone_id_int = int(zone_id)
+        except (TypeError, ValueError):
+            return jsonify({'error': f'invalid zone_id: {zone_id!r}'}), 400
+
+        zone_info = resolve_zone(zone_id_int)
+        if not zone_info:
+            return jsonify({'error': f'zone_id {zone_id_int} not found, '
+                                      f'or has no Edge Node device configured'}), 400
+
+        if not lang_code_in:
+            lang_code = zone_info['lang_code']
+        if not device_ip_in:
+            device_ip = zone_info['device_ip']
+        if not zone_code:
+            zone_code = zone_info['zone_code']
 
     if not text:
         return jsonify({'error':'text is required'}),400
@@ -799,9 +900,17 @@ if __name__ == '__main__':
     if not GEMINI_API_KEY:   raise SystemExit("GEMINI_API_KEY not set")
     if not VOICEMAKER_API_KEY: raise SystemExit("VOICEMAKER_API_KEY not set")
     get_gemini()
+    try:
+        get_db_connection().close()
+        log.info(f"[DB] Connected OK — {DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
+    except Exception as e:
+        log.error(f"[DB] Could not connect to {DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME}: {e}")
+        log.error("[DB] zone_id lookups will fail until this is fixed. "
+                   "requests without zone_id (using device_ip directly) still work.")
     log.info("="*60)
     log.info(f"  TTS         : Voicemaker ({TTS_GENDER})  speed={AUDIO_SPEED}x")
     log.info(f"  Play locally: {PLAY_LOCALLY}  device={AUDIO_DEVICE or 'auto'}")
+    log.info(f"  DB          : {DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
     log.info(f"  Listening   : http://{SERVER_HOST}:{SERVER_PORT}")
     log.info(f"  POST /synthesise    POST /note-acknowledge")
     log.info(f"  GET  /health        GET  /langs")

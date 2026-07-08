@@ -85,6 +85,7 @@ def start_execution(app, db, Sop, SopExecution, SopStepExecution, dispatch_broad
             db.session.commit()
         except Exception as e:
             log.error("[SOP] start_execution failed: %s", e)
+            db.session.rollback()
             execution.status = "FAILED"
             execution.error = str(e)[:500]
             execution.completed_at = datetime.now()
@@ -133,6 +134,7 @@ def acknowledge(app, db, SopExecution, SopStepExecution, dispatch_broadcast, all
                 execution.step_started_at = datetime.now()
             except Exception as e:
                 log.error("[SOP] acknowledge->next step failed: %s", e)
+                db.session.rollback()
                 execution.status = "FAILED"
                 execution.error = str(e)[:500]
                 execution.completed_at = datetime.now()

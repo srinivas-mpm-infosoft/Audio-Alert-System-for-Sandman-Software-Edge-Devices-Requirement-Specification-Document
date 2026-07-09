@@ -33,7 +33,7 @@ from flask import Flask, request, jsonify, send_from_directory, session
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import (
     text, func, and_, or_, desc, asc, Index,
-    Column, Integer, BigInteger, String, Text, DateTime, Boolean, JSON,
+    Column, Integer, BigInteger, String, Text, DateTime, Boolean, JSON, Float,
     ForeignKey, Enum, Numeric, SmallInteger,
 )
 from sqlalchemy.orm import relationship
@@ -86,6 +86,7 @@ ALL_PERMISSIONS = [
     "aa.schedule.view", "aa.schedule.edit",
     "aa.paging.use",
     "aa.sop.view", "aa.sop.edit", "aa.sop.delete", "aa.sop.run", "aa.sop.ack",
+    "aa.alerttypes.view", "aa.alerttypes.manage",
 ]
 DEFAULT_ROLE_PERMISSIONS = {
     "administrator":          list(ALL_PERMISSIONS),
@@ -849,6 +850,54 @@ class AlertEvent(db.Model):
         }
 
 
+class AlertTypeConfig(db.Model):
+    """
+    Configurable playback behavior per alert type (D7 — QOL). Critical/High/
+    Normal/Low ship as built-in defaults matching edge_node.py's previous
+    hardcoded behavior exactly, so nothing changes until an operator edits
+    them; operators can also add their own custom types (e.g. "Fire
+    Emergency"), which Manual/SOP/Scheduled dispatches can then pick.
+
+    is_blocking:  round-robins with every other unacked "blocking" item
+                  (regardless of type) and holds all non-blocking playback —
+                  generalizes the old Critical-only round-robin/block rule.
+    initial_play_count: None = unlimited (only valid together with
+                  requires_ack=True — otherwise nothing would ever stop it).
+    repeat_interval_sec / reduction_step_sec / min_interval_sec: each replay
+                  shrinks the interval by reduction_step_sec, floored at
+                  min_interval_sec — escalates urgency the longer it's ignored.
+    """
+    __tablename__ = "alert_type_configs"
+    id                  = Column(Integer, primary_key=True)
+    type_code           = Column(String(32), unique=True, nullable=False)
+    label               = Column(String(64), nullable=False)
+    is_builtin          = Column(Boolean, default=False)
+    sort_order          = Column(Integer, default=100)
+    is_blocking         = Column(Boolean, default=False)
+    initial_play_count  = Column(Integer)            # NULL = unlimited
+    repeat_interval_sec = Column(Float, default=30.0)
+    reduction_step_sec  = Column(Float, default=0.0)
+    min_interval_sec    = Column(Float, default=5.0)
+    requires_ack        = Column(Boolean, default=False)
+    created_at          = Column(DateTime, default=datetime.now)
+    updated_at          = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    def to_dict(self):
+        return {
+            "id":                  self.type_code,
+            "db_id":               self.id,
+            "label":               self.label,
+            "is_builtin":          bool(self.is_builtin),
+            "sort_order":          self.sort_order,
+            "is_blocking":         bool(self.is_blocking),
+            "initial_play_count":  self.initial_play_count,
+            "repeat_interval_sec": self.repeat_interval_sec,
+            "reduction_step_sec":  self.reduction_step_sec,
+            "min_interval_sec":    self.min_interval_sec,
+            "requires_ack":        bool(self.requires_ack),
+        }
+
+
 class ScheduledAnnouncement(db.Model):
     __tablename__ = "scheduled_announcements"
     id               = Column(Integer, primary_key=True)
@@ -856,13 +905,20 @@ class ScheduledAnnouncement(db.Model):
     name             = Column(String(255), nullable=False)
     message          = Column(Text)
     clip_id          = Column(Integer, ForeignKey("audio_clips.id", ondelete="SET NULL"))
-    language         = Column(String(8), default="EN")
+    language         = Column(String(8))                     # NULL = use each zone's configured default language
+    type_code        = Column(String(32))                    # NULL = built-in "Normal" behavior (unchanged default)
+    play_count_override   = Column(Integer)                  # NULL = use the alert type's configured play count
+    requires_ack_override  = Column(Boolean)                  # NULL = use the alert type's configured ack requirement
     zone_ids         = Column(JSON)             # list of zone_code strings
     plant_wide       = Column(Boolean, default=False)
-    schedule_type    = Column(String(16), default="once")   # once | daily | weekly
+    schedule_type    = Column(String(16), default="once")   # once | daily | weekly | hourly | shift
     scheduled_at     = Column(DateTime)                       # for "once"
     days_of_week     = Column(JSON)                           # for "weekly": [0..6], Mon=0
-    time_of_day      = Column(String(8))                      # "HH:MM" for daily/weekly
+    time_of_day      = Column(String(8))                      # "HH:MM" for daily/weekly; for "hourly" only the MM part is used (HH is ignored)
+    interval_hours   = Column(Integer)                        # for "hourly": fire every N hours
+    shift_name       = Column(String(64))                     # for "shift": key into the configured shifts dict
+    shift_event      = Column(String(16))                     # for "shift": start | end | offset
+    shift_offset_min = Column(Integer, default=0)             # for "shift" event=offset: minutes from shift start (negative = before)
     is_enabled       = Column(Boolean, default=True)
     next_run_at      = Column(DateTime)
     last_run_at      = Column(DateTime)
@@ -880,13 +936,20 @@ class ScheduledAnnouncement(db.Model):
             "name":            self.name,
             "message":         self.message,
             "clip_id":         self.clip.clip_code if self.clip else None,
-            "language":        self.language or "EN",
+            "language":        self.language,
+            "type_code":       self.type_code,
+            "play_count_override":   self.play_count_override,
+            "requires_ack_override": self.requires_ack_override,
             "zone_ids":        self.zone_ids or [],
             "plant_wide":      bool(self.plant_wide),
             "schedule_type":   self.schedule_type,
             "scheduled_at":    self.scheduled_at.isoformat() if self.scheduled_at else None,
             "days_of_week":    self.days_of_week or [],
             "time_of_day":     self.time_of_day,
+            "interval_hours":  self.interval_hours,
+            "shift_name":      self.shift_name,
+            "shift_event":     self.shift_event,
+            "shift_offset_min": self.shift_offset_min or 0,
             "is_enabled":      bool(self.is_enabled),
             "next_run_at":     self.next_run_at.isoformat() if self.next_run_at else None,
             "last_run_at":     self.last_run_at.isoformat() if self.last_run_at else None,
@@ -976,7 +1039,10 @@ class SopStep(db.Model):
     audio_mode = Column(String(16), default="text")     # text | clip
     message    = Column(Text)
     clip_id    = Column(Integer, ForeignKey("audio_clips.id", ondelete="SET NULL"))
-    language   = Column(String(8), default="EN")
+    language   = Column(String(8))                     # NULL = use each zone's configured default language
+    type_code  = Column(String(32))                    # NULL = built-in "High" behavior (unchanged default)
+    play_count_override   = Column(Integer)             # NULL = use the alert type's configured play count
+    requires_ack_override  = Column(Boolean)             # NULL = use the alert type's configured ack requirement
 
     clip = relationship("AudioClip", foreign_keys=[clip_id])
 
@@ -988,7 +1054,10 @@ class SopStep(db.Model):
             "audio_mode": self.audio_mode,
             "message":    self.message,
             "clip_id":    self.clip.clip_code if self.clip else None,
-            "language":   self.language or "EN",
+            "language":   self.language,
+            "type_code":  self.type_code,
+            "play_count_override":   self.play_count_override,
+            "requires_ack_override": self.requires_ack_override,
         }
 
 
@@ -1866,49 +1935,6 @@ def aa_config_audio_put():
     return jsonify(ok=True, data=_audio_config_runtime)
 
 
-_ALERT_ESCALATION_KEY = "alert_escalation_config"
-_ALERT_ESCALATION_DEFAULTS = {
-    "initial_interval_sec": 60,
-    "escalation_after_sec": 120,
-    "reduction_step_sec": 30,
-    "min_interval_sec": 10,
-}
-
-
-def _get_alert_escalation_config() -> dict:
-    raw = _kv_get(_ALERT_ESCALATION_KEY, "")
-    if raw:
-        try:
-            return json.loads(raw)
-        except Exception:
-            pass
-    return dict(_ALERT_ESCALATION_DEFAULTS)
-
-
-@app.route("/audio-alerts/config/alert-escalation", methods=["GET"])
-def aa_alert_escalation_get():
-    err = _require_login()
-    if err: return err
-    return jsonify(ok=True, data=_get_alert_escalation_config())
-
-
-@app.route("/audio-alerts/config/alert-escalation", methods=["PUT"])
-def aa_alert_escalation_put():
-    err = _require_login()
-    if err: return err
-    data = request.json or {}
-    config = {
-        "initial_interval_sec": max(1, int(data.get("initial_interval_sec", _ALERT_ESCALATION_DEFAULTS["initial_interval_sec"]))),
-        "escalation_after_sec": max(1, int(data.get("escalation_after_sec", _ALERT_ESCALATION_DEFAULTS["escalation_after_sec"]))),
-        "reduction_step_sec":   max(1, int(data.get("reduction_step_sec",   _ALERT_ESCALATION_DEFAULTS["reduction_step_sec"]))),
-        "min_interval_sec":     max(1, int(data.get("min_interval_sec",     _ALERT_ESCALATION_DEFAULTS["min_interval_sec"]))),
-    }
-    _kv_set(_ALERT_ESCALATION_KEY, json.dumps(config))
-    db.session.commit()
-    _add_audit("config.change", "alert_escalation", "Alert escalation config updated", after=config)
-    return jsonify(ok=True, data=config)
-
-
 @app.route("/audio-alerts/config/app-settings", methods=["GET"])
 def aa_app_settings_get():
     err = _require_login()
@@ -2248,32 +2274,6 @@ def aa_shift_times_put():
     return jsonify(ok=True, data=data)
 
 
-# ══════════════════════════════════════════════════════════════════════
-# E) SEED BLOCK — add this INSIDE _seed_lookups(), after the Zone seed block
-#    (before the closing of the function)
-# ══════════════════════════════════════════════════════════════════════
- 
-    # Seed app_languages from the LANGUAGES constant (runs once)
-    if AppLanguage.query.count() == 0:
-        for lang in LANGUAGES:
-            db.session.add(AppLanguage(
-                code  = lang["code"],
-                label = lang["label"],
-                flag  = lang["flag"],
-            ))
-        db.session.commit()
-        log.info("Seeded app_languages")
- 
-    # Seed app_zone_types from the ZONE_TYPES constant (runs once)
-    if AppZoneType.query.count() == 0:
-        for zt in ZONE_TYPES:
-            db.session.add(AppZoneType(label=zt))
-        db.session.commit()
-        log.info("Seeded app_zone_types")
- 
-
-
-
 # ============================================================
 # AUDIO ALERTS — Active Alerts (read from DB)
 # ============================================================
@@ -2380,7 +2380,7 @@ def aa_broadcast():
     zone_ids = data.get("zone_ids", [])
     message  = (data.get("message") or "").strip() or None
     clip_id  = data.get("clip_id")
-    language = data.get("language", "EN")
+    language = (data.get("language") or "").strip() or None  # None = use each zone's configured default language
 
     if not zone_ids:
         return jsonify(ok=False, error="At least one zone is required"), 400
@@ -2394,6 +2394,15 @@ def aa_broadcast():
             return jsonify(ok=False, error="Clip not found or has no audio file"), 404
         clip_path = clip.file_path
 
+    play_count_override = data.get("play_count_override")
+    if play_count_override not in (None, ""):
+        play_count_override = int(play_count_override)
+    else:
+        play_count_override = None
+    requires_ack_override = data.get("requires_ack_override")
+    if requires_ack_override is not None:
+        requires_ack_override = bool(requires_ack_override)
+
     user = _current_user().get("username", "unknown")
     events_bus.publish({
         "type": "manual_broadcast", "event": "start", "operator": user,
@@ -2404,6 +2413,9 @@ def aa_broadcast():
         receipts = dispatch_service.dispatch_broadcast(
             zone_ids, message=message, clip_path=clip_path, language=language,
             alert_category=data.get("priority", "Normal"), alert_source="Manual Broadcast",
+            type_code=data.get("type_code"),
+            play_count_override=play_count_override,
+            requires_ack_override=requires_ack_override,
         )
     finally:
         events_bus.publish({
@@ -2674,12 +2686,23 @@ def aa_schedules_get():
 def _apply_schedule_fields(sched, data):
     if "name" in data: sched.name = data["name"]
     if "message" in data: sched.message = data["message"]
-    if "language" in data: sched.language = data["language"]
+    if "language" in data: sched.language = data["language"] or None
+    if "type_code" in data: sched.type_code = data["type_code"] or None
+    if "play_count_override" in data:
+        v = data["play_count_override"]
+        sched.play_count_override = int(v) if v not in (None, "") else None
+    if "requires_ack_override" in data:
+        v = data["requires_ack_override"]
+        sched.requires_ack_override = bool(v) if v is not None else None
     if "zone_ids" in data: sched.zone_ids = data["zone_ids"] or []
     if "plant_wide" in data: sched.plant_wide = bool(data["plant_wide"])
     if "schedule_type" in data: sched.schedule_type = data["schedule_type"]
     if "days_of_week" in data: sched.days_of_week = data["days_of_week"] or []
     if "time_of_day" in data: sched.time_of_day = data["time_of_day"]
+    if "interval_hours" in data: sched.interval_hours = data["interval_hours"]
+    if "shift_name" in data: sched.shift_name = data["shift_name"]
+    if "shift_event" in data: sched.shift_event = data["shift_event"]
+    if "shift_offset_min" in data: sched.shift_offset_min = data["shift_offset_min"] or 0
     if "is_enabled" in data: sched.is_enabled = bool(data["is_enabled"])
     if "scheduled_at" in data and data["scheduled_at"]:
         dt = datetime.fromisoformat(data["scheduled_at"])
@@ -2695,6 +2718,20 @@ def _apply_schedule_fields(sched, data):
         sched.clip_id = clip.id if clip else None
 
 
+def _get_shifts_config():
+    sc = _read_sc()
+    return sc.get("shifts", DEFAULT_SYSTEM_CONFIG["shifts"])
+
+
+def _compute_schedule_next_run(sched):
+    return scheduler_service.compute_next_run(
+        sched.schedule_type, sched.scheduled_at, sched.days_of_week, sched.time_of_day,
+        interval_hours=sched.interval_hours, shift_name=sched.shift_name,
+        shift_event=sched.shift_event, shift_offset_min=sched.shift_offset_min,
+        shifts_config=_get_shifts_config(),
+    )
+
+
 @app.route("/audio-alerts/schedules", methods=["POST"])
 def aa_schedules_post():
     err = _require_login()
@@ -2708,15 +2745,20 @@ def aa_schedules_post():
         return jsonify(ok=False, error="Either a message or a clip_id is required"), 400
     if not data.get("zone_ids") and not data.get("plant_wide"):
         return jsonify(ok=False, error="Select target zone(s) or plant-wide"), 400
+    if data.get("schedule_type") == "hourly" and not data.get("interval_hours"):
+        return jsonify(ok=False, error="Choose how often (every N hours)"), 400
+    if data.get("schedule_type") == "shift":
+        if not data.get("shift_name") or data["shift_name"] not in _get_shifts_config():
+            return jsonify(ok=False, error="Choose a valid shift"), 400
+        if data.get("shift_event") not in ("start", "end", "offset"):
+            return jsonify(ok=False, error="Choose when during the shift"), 400
 
     sched = ScheduledAnnouncement(
         schedule_code=_next_schedule_code(),
         created_by=_current_user().get("username", "unknown"),
     )
     _apply_schedule_fields(sched, data)
-    sched.next_run_at = scheduler_service.compute_next_run(
-        sched.schedule_type, sched.scheduled_at, sched.days_of_week, sched.time_of_day,
-    )
+    sched.next_run_at = _compute_schedule_next_run(sched)
     db.session.add(sched)
     db.session.commit()
     if sched.message and not sched.clip_id:
@@ -2738,9 +2780,7 @@ def aa_schedules_put(sched_id):
     before = sched.to_dict()
     data = request.json or {}
     _apply_schedule_fields(sched, data)
-    sched.next_run_at = scheduler_service.compute_next_run(
-        sched.schedule_type, sched.scheduled_at, sched.days_of_week, sched.time_of_day,
-    )
+    sched.next_run_at = _compute_schedule_next_run(sched)
     db.session.commit()
     if sched.message and not sched.clip_id and ("message" in data or "language" in data):
         dispatch_service.warm_cache_async(sched.message, sched.language or "EN",
@@ -2776,9 +2816,7 @@ def aa_schedules_enable(sched_id):
     if not sched:
         return jsonify(ok=False, error="Schedule not found"), 404
     sched.is_enabled = True
-    sched.next_run_at = scheduler_service.compute_next_run(
-        sched.schedule_type, sched.scheduled_at, sched.days_of_week, sched.time_of_day,
-    )
+    sched.next_run_at = _compute_schedule_next_run(sched)
     db.session.commit()
     return jsonify(ok=True, data=sched.to_dict())
 
@@ -2795,6 +2833,114 @@ def aa_schedules_disable(sched_id):
     sched.is_enabled = False
     db.session.commit()
     return jsonify(ok=True, data=sched.to_dict())
+
+
+# ============================================================
+# AUDIO ALERTS — Alert Type Settings (D7)
+#
+# Configurable playback behavior per alert type. Manual/SOP/Scheduled
+# dispatches reference a type_code here (falling back to sensible per-kind
+# defaults if not set) to resolve play count / repeat interval / reduction
+# step / requires_ack, which dispatch_service.py then hands to the edge
+# node's /play call — see dispatch_service._resolve_alert_type().
+# ============================================================
+
+def _next_alert_type_code(label: str) -> str:
+    base = "".join(c.lower() if c.isalnum() else "_" for c in label).strip("_") or "type"
+    code = base
+    n = 1
+    while AlertTypeConfig.query.filter_by(type_code=code).first():
+        n += 1
+        code = f"{base}_{n}"
+    return code
+
+
+@app.route("/audio-alerts/alert-types", methods=["GET"])
+def aa_alert_types_get():
+    err = _require_login()
+    if err: return err
+    if not _can("aa.alerttypes.view"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    rows = AlertTypeConfig.query.order_by(AlertTypeConfig.sort_order.asc()).all()
+    return jsonify(ok=True, data=[r.to_dict() for r in rows])
+
+
+def _apply_alert_type_fields(cfg, data):
+    if "label" in data and data["label"]: cfg.label = data["label"]
+    if "sort_order" in data: cfg.sort_order = int(data["sort_order"])
+    if "is_blocking" in data: cfg.is_blocking = bool(data["is_blocking"])
+    if "initial_play_count" in data:
+        v = data["initial_play_count"]
+        cfg.initial_play_count = int(v) if v not in (None, "") else None
+    if "repeat_interval_sec" in data: cfg.repeat_interval_sec = float(data["repeat_interval_sec"])
+    if "reduction_step_sec" in data: cfg.reduction_step_sec = float(data["reduction_step_sec"])
+    if "min_interval_sec" in data: cfg.min_interval_sec = float(data["min_interval_sec"])
+    if "requires_ack" in data: cfg.requires_ack = bool(data["requires_ack"])
+    # An "unlimited plays" type with no acknowledgement path would repeat
+    # forever with no way to ever stop — the settings UI shouldn't be able
+    # to create that dead end.
+    if cfg.initial_play_count is None and not cfg.requires_ack:
+        raise ValueError("An alert type with unlimited plays must require acknowledgement")
+
+
+@app.route("/audio-alerts/alert-types", methods=["POST"])
+def aa_alert_types_post():
+    err = _require_login()
+    if err: return err
+    if not _can("aa.alerttypes.manage"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    data = request.json or {}
+    if not data.get("label", "").strip():
+        return jsonify(ok=False, error="Name is required"), 400
+    cfg = AlertTypeConfig(type_code=_next_alert_type_code(data["label"]), is_builtin=False,
+                         repeat_interval_sec=30.0, min_interval_sec=5.0)
+    try:
+        _apply_alert_type_fields(cfg, data)
+    except ValueError as e:
+        return jsonify(ok=False, error=str(e)), 400
+    db.session.add(cfg)
+    db.session.commit()
+    _add_audit("alerttype.add", f"alert-type/{cfg.type_code}", f"Alert type: {cfg.label}", after=cfg.to_dict())
+    return jsonify(ok=True, data=cfg.to_dict()), 201
+
+
+@app.route("/audio-alerts/alert-types/<type_code>", methods=["PUT"])
+def aa_alert_types_put(type_code):
+    err = _require_login()
+    if err: return err
+    if not _can("aa.alerttypes.manage"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    cfg = AlertTypeConfig.query.filter_by(type_code=type_code).first()
+    if not cfg:
+        return jsonify(ok=False, error="Alert type not found"), 404
+    before = cfg.to_dict()
+    data = request.json or {}
+    try:
+        _apply_alert_type_fields(cfg, data)
+    except ValueError as e:
+        return jsonify(ok=False, error=str(e)), 400
+    db.session.commit()
+    _add_audit("alerttype.edit", f"alert-type/{cfg.type_code}", f"Alert type: {cfg.label}",
+              before=before, after=cfg.to_dict())
+    return jsonify(ok=True, data=cfg.to_dict())
+
+
+@app.route("/audio-alerts/alert-types/<type_code>", methods=["DELETE"])
+def aa_alert_types_del(type_code):
+    err = _require_login()
+    if err: return err
+    if not _can("aa.alerttypes.manage"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    cfg = AlertTypeConfig.query.filter_by(type_code=type_code).first()
+    if not cfg:
+        return jsonify(ok=False, error="Alert type not found"), 404
+    if cfg.is_builtin:
+        return jsonify(ok=False, error="Built-in alert types can be edited but not deleted"), 400
+    before = cfg.to_dict()
+    db.session.delete(cfg)
+    db.session.commit()
+    _add_audit("alerttype.remove", f"alert-type/{type_code}", f"Alert type: {before.get('label')}", before=before)
+    return jsonify(ok=True, data={"id": type_code})
 
 
 # ============================================================
@@ -2823,13 +2969,18 @@ def _apply_sop_fields(sop, data):
             clip = None
             if step_data.get("clip_id"):
                 clip = AudioClip.query.filter_by(clip_code=step_data["clip_id"]).first()
+            play_count_override = step_data.get("play_count_override")
+            requires_ack_override = step_data.get("requires_ack_override")
             sop.steps.append(SopStep(
                 seq=i,
                 title=step_data.get("title") or f"Step {i + 1}",
                 audio_mode=step_data.get("audio_mode", "text"),
                 message=step_data.get("message"),
                 clip_id=clip.id if clip else None,
-                language=step_data.get("language", "EN"),
+                language=step_data.get("language") or None,
+                type_code=step_data.get("type_code") or None,
+                play_count_override=int(play_count_override) if play_count_override not in (None, "") else None,
+                requires_ack_override=bool(requires_ack_override) if requires_ack_override is not None else None,
             ))
 
 
@@ -3009,6 +3160,25 @@ def aa_sop_ack(execution_id):
         return jsonify(ok=False, error=error), 400
     _add_audit("sop.acknowledge", f"sop-execution/{execution_id}",
               f"SOP step acknowledged: {out['sop_name']}", after=out)
+    return jsonify(ok=True, data=out)
+
+
+@app.route("/audio-alerts/sops/executions/<execution_id>/repeat", methods=["POST"])
+def aa_sop_repeat(execution_id):
+    err = _require_login()
+    if err: return err
+    if not _can("aa.sop.ack"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    user = _current_user().get("username", "unknown")
+    out, error = sop_service.repeat_current_step(
+        app, db, SopExecution, SopStepExecution,
+        dispatch_service.dispatch_broadcast, dispatch_service.all_zone_codes,
+        execution_id, user, acknowledge_on_edge=dispatch_service.acknowledge_on_edge,
+    )
+    if error:
+        return jsonify(ok=False, error=error), 400
+    _add_audit("sop.repeat", f"sop-execution/{execution_id}",
+              f"SOP step repeated: {out['sop_name']}", after=out)
     return jsonify(ok=True, data=out)
 
 
@@ -3944,6 +4114,42 @@ def _sop_execution_for_zone(zone_code):
     return next((e for e in candidates if _execution_targets_zone(e, zone_code)), None)
 
 
+def _edge_playback_logs(zone_code: str, limit: int) -> list:
+    """Recent alert_logs rows for this edge node's zone — for its local
+    dashboard's "playback logs" view. Same raw-SQL pattern as _alert_info()
+    since alert_logs has no SQLAlchemy model."""
+    try:
+        rows = db.session.execute(text(
+            "SELECT alert_id, alert_timestamp, alert_category, alert_source, announcement_type, "
+            "lang_code, edge_delivered, audio_played "
+            "FROM alert_logs WHERE zone_code = :zc ORDER BY alert_timestamp DESC LIMIT :lim"
+        ), {"zc": zone_code, "lim": limit}).mappings().all()
+    except Exception as e:
+        log.warning("_edge_playback_logs failed for zone=%s: %s", zone_code, e)
+        return []
+    return [{
+        "alert_id":          r["alert_id"],
+        "timestamp":         r["alert_timestamp"].isoformat() if r["alert_timestamp"] else None,
+        "alert_category":    r["alert_category"],
+        "alert_source":      r["alert_source"],
+        "announcement_type": r["announcement_type"],
+        "lang_code":         r["lang_code"],
+        "edge_delivered":    bool(r["edge_delivered"]),
+        "audio_played":      bool(r["audio_played"]),
+    } for r in rows]
+
+
+@app.route("/audio-alerts/edge/playback-logs", methods=["GET"])
+def aa_edge_playback_logs():
+    """Recent playback log for this edge node's zone — called by
+    edge_node.py's own /dashboard/playback-logs proxy route."""
+    zone_code = request.args.get("zone", "").strip()
+    if not zone_code:
+        return jsonify(ok=False, error="zone required"), 400
+    limit = max(1, min(100, request.args.get("limit", 20, type=int) or 20))
+    return jsonify(ok=True, data=_edge_playback_logs(zone_code, limit))
+
+
 @app.route("/audio-alerts/edge/alert-info", methods=["GET"])
 def aa_edge_alert_info():
     """What is alert_id X? — lets an edge node label its own /health
@@ -3988,6 +4194,31 @@ def aa_edge_sop_ack():
     )
     if error:
         # e.g. already acknowledged by someone else — safe no-op, not a crash
+        return jsonify(ok=False, error=error), 409
+    return jsonify(ok=True, data=out)
+
+
+@app.route("/audio-alerts/edge/sop-repeat", methods=["POST"])
+def aa_edge_sop_repeat():
+    """Manual "repeat this step" from the edge node's own dashboard."""
+    body = request.get_json(force=True, silent=True) or {}
+    execution_id = body.get("execution_id")
+    zone_code    = (body.get("zone_code") or "").strip()
+    if not execution_id or not zone_code:
+        return jsonify(ok=False, error="execution_id and zone_code required"), 400
+
+    execution = SopExecution.query.filter_by(execution_code=execution_id).first()
+    if not execution:
+        return jsonify(ok=False, error="Execution not found"), 404
+    if not _execution_targets_zone(execution, zone_code):
+        return jsonify(ok=False, error="This execution does not target your zone"), 403
+
+    out, error = sop_service.repeat_current_step(
+        app, db, SopExecution, SopStepExecution,
+        dispatch_service.dispatch_broadcast, dispatch_service.all_zone_codes,
+        execution_id, f"edge:{zone_code}", acknowledge_on_edge=dispatch_service.acknowledge_on_edge,
+    )
+    if error:
         return jsonify(ok=False, error=error), 409
     return jsonify(ok=True, data=out)
 
@@ -4680,6 +4911,16 @@ def _run_migrations():
         # column (MODIFY COLUMN is safe to re-run; no-op once already 32).
         "ALTER TABLE sop_executions MODIFY COLUMN status VARCHAR(32)",
         "ALTER TABLE sop_executions ADD COLUMN IF NOT EXISTS current_receipts JSON",
+        "ALTER TABLE scheduled_announcements ADD COLUMN IF NOT EXISTS interval_hours INT",
+        "ALTER TABLE scheduled_announcements ADD COLUMN IF NOT EXISTS shift_name VARCHAR(64)",
+        "ALTER TABLE scheduled_announcements ADD COLUMN IF NOT EXISTS shift_event VARCHAR(16)",
+        "ALTER TABLE scheduled_announcements ADD COLUMN IF NOT EXISTS shift_offset_min INT DEFAULT 0",
+        "ALTER TABLE scheduled_announcements ADD COLUMN IF NOT EXISTS type_code VARCHAR(32)",
+        "ALTER TABLE scheduled_announcements ADD COLUMN IF NOT EXISTS play_count_override INT",
+        "ALTER TABLE scheduled_announcements ADD COLUMN IF NOT EXISTS requires_ack_override TINYINT(1)",
+        "ALTER TABLE sop_steps ADD COLUMN IF NOT EXISTS type_code VARCHAR(32)",
+        "ALTER TABLE sop_steps ADD COLUMN IF NOT EXISTS play_count_override INT",
+        "ALTER TABLE sop_steps ADD COLUMN IF NOT EXISTS requires_ack_override TINYINT(1)",
         # New tables created automatically by SQLAlchemy — no ALTER needed
         # but we add them here as safety guards:
         """CREATE TABLE IF NOT EXISTS zone_language_configs (
@@ -4766,6 +5007,22 @@ def _run_migrations():
             ended_at     DATETIME,
             UNIQUE KEY uq_paging_sessions_session_code (session_code)
         )""",
+        """CREATE TABLE IF NOT EXISTS alert_type_configs (
+            id                  INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            type_code           VARCHAR(32) NOT NULL,
+            label               VARCHAR(64) NOT NULL,
+            is_builtin          BOOLEAN DEFAULT FALSE,
+            sort_order          INT DEFAULT 100,
+            is_blocking         BOOLEAN DEFAULT FALSE,
+            initial_play_count  INT,
+            repeat_interval_sec FLOAT DEFAULT 30.0,
+            reduction_step_sec  FLOAT DEFAULT 0.0,
+            min_interval_sec    FLOAT DEFAULT 5.0,
+            requires_ack        BOOLEAN DEFAULT FALSE,
+            created_at          DATETIME,
+            updated_at          DATETIME,
+            UNIQUE KEY uq_alert_type_configs_type_code (type_code)
+        )""",
     ]
     with db.engine.connect() as conn:
         for sql in migrations:
@@ -4774,6 +5031,27 @@ def _run_migrations():
                 conn.commit()
             except Exception as e:
                 log.warning("Migration skipped (%s): %s", sql[:60], e)
+
+    # Seed the 4 built-in alert types on first run only — these values
+    # exactly match edge_node.py's previous hardcoded behavior (Critical
+    # round-robins/blocks forever, High replays every 20s forever, Normal/Low
+    # play once), so nothing changes for existing deployments until an
+    # operator actually edits them from the Alert Type Settings page.
+    if AlertTypeConfig.query.count() == 0:
+        for type_code, label, sort_order, is_blocking, play_count, interval, reduction, min_interval, requires_ack in [
+            ("critical", "Critical", 0, True,  None, 0.0,  0.0, 0.0,  True),
+            ("high",     "High",     1, False, None, 20.0, 0.0, 20.0, True),
+            ("normal",   "Normal",   2, False, 1,    60.0, 0.0, 60.0, False),
+            ("low",      "Low",      3, False, 1,    60.0, 0.0, 60.0, False),
+        ]:
+            db.session.add(AlertTypeConfig(
+                type_code=type_code, label=label, is_builtin=True, sort_order=sort_order,
+                is_blocking=is_blocking, initial_play_count=play_count,
+                repeat_interval_sec=interval, reduction_step_sec=reduction,
+                min_interval_sec=min_interval, requires_ack=requires_ack,
+            ))
+        db.session.commit()
+        log.info("Seeded 4 built-in alert types (critical/high/normal/low)")
 
 
 def _seed_users():
@@ -4889,6 +5167,7 @@ if __name__ == "__main__":
     scheduler_service.start(
         app, db, ScheduledAnnouncement,
         dispatch_service.dispatch_broadcast, dispatch_service.all_zone_codes,
+        get_shifts_config=_get_shifts_config,
     )
     sop_service.start_timeout_checker(
         app, db, SopExecution, SopStepExecution,

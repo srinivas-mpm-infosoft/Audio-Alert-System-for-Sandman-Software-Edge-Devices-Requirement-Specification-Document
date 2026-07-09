@@ -6,13 +6,14 @@ import ConfirmDialog from "./components/ConfirmDialog";
 import ZonePicker from "./components/ZonePicker";
 import LanguagePicker from "./components/LanguagePicker";
 import AudioPreviewButton from "./components/AudioPreviewButton";
+import AlertTypeOverrideFields from "./components/AlertTypeOverrideFields";
 import { getClips, uploadClip } from "./api/audio.api";
 
 export default function ManualBroadcast() {
   const showToast = useToast();
 
   const [broadcastZones, setBroadcastZones] = useState([]);
-  const [broadcastLang, setBroadcastLang] = useState("EN");
+  const [broadcastLang, setBroadcastLang] = useState(null);
   const [broadcastMsg, setBroadcastMsg] = useState("");
   const [broadcastClipId, setBroadcastClipId] = useState("");
   const [broadcastMode, setBroadcastMode] = useState("text");
@@ -20,6 +21,7 @@ export default function ManualBroadcast() {
   const [broadcastConfirm, setBroadcastConfirm] = useState(false);
   const [clips, setClips] = useState([]);
   const [clipUploading, setClipUploading] = useState(false);
+  const [override, setOverride] = useState({ type_code: null, play_count_override: null, requires_ack_override: null });
   const clipFileRef = useRef(null);
 
   useEffect(() => {
@@ -30,7 +32,7 @@ export default function ManualBroadcast() {
     if (!file) return;
     setClipUploading(true);
     try {
-      const res = await uploadClip({ name: file.name.replace(/\.[^.]+$/, ""), language: broadcastLang }, file);
+      const res = await uploadClip({ name: file.name.replace(/\.[^.]+$/, ""), language: broadcastLang || "EN" }, file);
       if (res.ok) {
         setClips((c) => [res.data, ...c]);
         setBroadcastClipId(res.data.id);
@@ -53,6 +55,9 @@ export default function ManualBroadcast() {
         message: broadcastMode === "text" ? broadcastMsg : undefined,
         clip_id: broadcastMode === "clip" ? broadcastClipId : undefined,
         audio_type: "voice",
+        type_code: override.type_code,
+        play_count_override: override.play_count_override,
+        requires_ack_override: override.requires_ack_override,
       });
       if (res.ok) {
         showToast("Broadcast sent successfully", "success");
@@ -81,8 +86,10 @@ export default function ManualBroadcast() {
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 flex flex-col gap-4">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <ZonePicker selected={broadcastZones} onChange={setBroadcastZones} label="Target Zones" />
-          <LanguagePicker value={broadcastLang} onChange={setBroadcastLang} label="Language" />
+          <LanguagePicker value={broadcastLang} onChange={setBroadcastLang} label="Language" includeZoneDefault />
         </div>
+
+        <AlertTypeOverrideFields value={override} onChange={setOverride} defaultTypeLabel="Default (Normal)" />
 
         <div>
           <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block">Message Type</label>

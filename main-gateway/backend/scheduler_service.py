@@ -151,10 +151,13 @@ def _run_due(app, db, ScheduledAnnouncement, dispatch_broadcast, all_zone_codes,
                         zone_codes,
                         message=sched.message if not clip_path else None,
                         clip_path=clip_path,
-                        language=sched.language or "EN",
-                        alert_category="Normal",
+                        language=sched.language,
+                        alert_category=sched.type_code or "Normal",
                         alert_source=f"Scheduled: {sched.name}",
                         announcement_type="scheduled",
+                        type_code=sched.type_code,
+                        play_count_override=sched.play_count_override,
+                        requires_ack_override=sched.requires_ack_override,
                     )
                     delivered = sum(1 for r in receipts if r.get("edge_delivered"))
                     if not receipts:

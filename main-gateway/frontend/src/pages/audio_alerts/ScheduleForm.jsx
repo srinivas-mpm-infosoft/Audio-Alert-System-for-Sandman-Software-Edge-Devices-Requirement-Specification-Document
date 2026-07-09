@@ -5,6 +5,7 @@ import {
 } from "lucide-react";
 import ZonePicker from "./components/ZonePicker";
 import LanguagePicker from "./components/LanguagePicker";
+import AlertTypeOverrideFields from "./components/AlertTypeOverrideFields";
 import AudioPreviewButton from "./components/AudioPreviewButton";
 import TimeWheelPicker from "./components/TimeWheelPicker";
 import { getClips, uploadClip } from "./api/audio.api";
@@ -69,7 +70,10 @@ function blank(initial) {
     message: initial?.message || "",
     clip_id: initial?.clip_id || "",
     audio_mode: initial?.clip_id ? "clip" : "text",
-    language: initial?.language || "EN",
+    language: initial?.language ?? null,
+    type_code: initial?.type_code ?? null,
+    play_count_override: initial?.play_count_override ?? null,
+    requires_ack_override: initial?.requires_ack_override ?? null,
     zone_ids: initial?.zone_ids || [],
     plant_wide: initial?.plant_wide || false,
     whenMode: whenModeFor(initial),
@@ -96,6 +100,9 @@ function toPayload(form) {
     message: form.audio_mode === "text" ? form.message.trim() : null,
     clip_id: form.audio_mode === "clip" ? form.clip_id : null,
     language: form.language,
+    type_code: form.type_code,
+    play_count_override: form.play_count_override,
+    requires_ack_override: form.requires_ack_override,
     zone_ids: form.plant_wide ? [] : form.zone_ids,
     plant_wide: form.plant_wide,
     is_enabled: form.is_enabled,
@@ -190,7 +197,7 @@ export default function ScheduleForm({ initialSchedule, onSave, onCancel }) {
     if (!file) return;
     setClipUploading(true);
     try {
-      const res = await uploadClip({ name: file.name.replace(/\.[^.]+$/, ""), language: form.language }, file);
+      const res = await uploadClip({ name: file.name.replace(/\.[^.]+$/, ""), language: form.language || "EN" }, file);
       if (res.ok) {
         setClips((c) => [res.data, ...c]);
         set("clip_id", res.data.id);
@@ -317,7 +324,13 @@ export default function ScheduleForm({ initialSchedule, onSave, onCancel }) {
           )}
         </div>
 
-        <LanguagePicker value={form.language} onChange={(v) => set("language", v)} label="Language" />
+        <LanguagePicker value={form.language} onChange={(v) => set("language", v)} label="Language" includeZoneDefault />
+
+        <AlertTypeOverrideFields
+          value={form}
+          onChange={(next) => setForm((f) => ({ ...f, ...next }))}
+          defaultTypeLabel="Default (Normal)"
+        />
       </div>
 
       {/* 3. When should it play? */}

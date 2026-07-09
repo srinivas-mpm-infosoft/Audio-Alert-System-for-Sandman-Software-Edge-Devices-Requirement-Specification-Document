@@ -119,9 +119,12 @@ def _connect():
 
 def resolve_targets(zone_codes: list) -> list:
     """
-    zone_codes -> [{zone_code, zone_name, device_ip}, ...] for zones that
-    have a reachable device configured. Mirrors alert_poller.get_gateway_ip's
-    'Edge Node/Gateway device_type first, else any dotted-IP address' fallback.
+    zone_codes -> [{zone_code, zone_name, device_ip, default_language}, ...]
+    for zones that have a reachable device configured. Mirrors
+    alert_poller.get_gateway_ip's 'Edge Node/Gateway device_type first, else
+    any dotted-IP address' fallback. default_language lets callers leave
+    language unspecified and have each zone play in its own configured
+    language (see _dispatch_one).
     """
     if not zone_codes:
         return []
@@ -132,7 +135,7 @@ def resolve_targets(zone_codes: list) -> list:
     try:
         with conn.cursor() as c:
             fmt = ",".join(["%s"] * len(zone_codes))
-            c.execute(f"SELECT id, zone_code, name FROM zones WHERE zone_code IN ({fmt})", zone_codes)
+            c.execute(f"SELECT id, zone_code, name, default_language FROM zones WHERE zone_code IN ({fmt})", zone_codes)
             zones = c.fetchall()
             for z in zones:
                 c.execute(
@@ -151,12 +154,54 @@ def resolve_targets(zone_codes: list) -> list:
                     "zone_code": z["zone_code"],
                     "zone_name": z["name"],
                     "device_ip": row["address"] if row else None,
+                    "default_language": z.get("default_language") or "EN",
                 })
     except Exception as e:
         log.error("[Dispatch] resolve_targets failed: %s", e)
     finally:
         conn.close()
     return out
+
+
+_DEFAULT_ALERT_TYPE_BEHAVIOR = {
+    "is_blocking": False, "initial_play_count": 1, "repeat_interval_sec": 60.0,
+    "reduction_step_sec": 0.0, "min_interval_sec": 60.0, "requires_ack": False,
+    "sort_order": 100,
+}
+
+
+def resolve_alert_type(type_code: str) -> dict:
+    """
+    Look up the configured playback behavior (play count / repeat interval /
+    reduction step / requires_ack / is_blocking) for a type_code from
+    alert_type_configs. Falls back to a safe "play once, no ack needed"
+    default if the type isn't configured — never silently falls back to
+    "repeat forever" with no way to stop it.
+    """
+    slug = (type_code or "normal").strip().lower().replace(" ", "_")
+    conn = _connect()
+    if not conn:
+        return dict(_DEFAULT_ALERT_TYPE_BEHAVIOR)
+    try:
+        with conn.cursor() as c:
+            c.execute("SELECT * FROM alert_type_configs WHERE type_code=%s LIMIT 1", (slug,))
+            row = c.fetchone()
+        if not row:
+            return dict(_DEFAULT_ALERT_TYPE_BEHAVIOR)
+        return {
+            "is_blocking":         bool(row["is_blocking"]),
+            "initial_play_count":  row["initial_play_count"],
+            "repeat_interval_sec": float(row["repeat_interval_sec"] or 0),
+            "reduction_step_sec":  float(row["reduction_step_sec"] or 0),
+            "min_interval_sec":    float(row["min_interval_sec"] or 0),
+            "requires_ack":        bool(row["requires_ack"]),
+            "sort_order":          row["sort_order"],
+        }
+    except Exception as e:
+        log.error("[Dispatch] resolve_alert_type(%s) failed: %s", type_code, e)
+        return dict(_DEFAULT_ALERT_TYPE_BEHAVIOR)
+    finally:
+        conn.close()
 
 
 def resolve_target(zone_code: str) -> Optional[dict]:
@@ -215,13 +260,15 @@ def _insert_log(row: dict):
 
 # NOTE: conceptually mirrors edge-services/alert_poller.py's call_synthesise() — not shared code, keep in sync manually if either changes.
 def call_synthesise(text: str, lang_code: str, alert_id: int, zone_code: str,
-                    alert_category: str, device_ip: str, alert_source: str = "") -> dict:
+                    alert_category: str, device_ip: str, alert_source: str = "",
+                    behavior: Optional[dict] = None) -> dict:
     """POST to tts_server /synthesise. Synchronous — translate+TTS+deliver."""
     url = f"{TTS_SERVER_URL.rstrip('/')}/synthesise"
     payload = {
         "text": text, "lang_code": lang_code, "alert_id": alert_id,
         "zone_code": zone_code, "alert_category": alert_category,
         "device_ip": device_ip, "alert_source": alert_source,
+        **(behavior or {}),
     }
     t0 = time.monotonic()
     try:
@@ -244,20 +291,22 @@ def call_synthesise(text: str, lang_code: str, alert_id: int, zone_code: str,
 
 
 def deliver_clip(file_path: str, device_ip: str, alert_id: int,
-                 alert_category: str, lang_code: str) -> dict:
+                 alert_category: str, lang_code: str, behavior: Optional[dict] = None) -> dict:
     """POST a pre-recorded clip file directly to edge_node /play (no TTS needed)."""
     p = Path(file_path)
     if not p.exists():
         return {"ok": False, "edge_delivered": False, "audio_queued": False,
                 "error": f"Clip file not found: {file_path}"}
     url = f"http://{device_ip}:{EDGE_NODE_PORT}/play"
+    form = {"alert_id": str(alert_id), "alert_category": alert_category, "lang_code": lang_code}
+    for k, v in (behavior or {}).items():
+        form[k] = "" if v is None else str(v)
     try:
         with open(p, "rb") as f:
             resp = requests.post(
                 url,
                 files={"audio": (p.name, f, "audio/mpeg")},
-                data={"alert_id": str(alert_id), "alert_category": alert_category,
-                      "lang_code": lang_code},
+                data=form,
                 timeout=PLAY_TIMEOUT_SEC,
             )
         ok = resp.status_code == 200
@@ -334,21 +383,33 @@ def send_test_tone(zone_code: str) -> dict:
 # ============================================================
 
 def _dispatch_one(target: dict, *, text, clip_path, language, alert_category,
-                  alert_source, alert_id: int, announcement_type: str = "broadcast") -> dict:
+                  alert_source, alert_id: int, announcement_type: str = "broadcast",
+                  type_code: Optional[str] = None, play_count_override: Optional[int] = None,
+                  requires_ack_override: Optional[bool] = None) -> dict:
     zone_code = target["zone_code"]
     device_ip = target.get("device_ip")
     audio_mode = "clip" if clip_path else "tts"
+    # Language left unspecified -> each zone plays in its own configured
+    # default language rather than one language forced across every zone.
+    lang = language or target.get("default_language") or "EN"
+    behavior = resolve_alert_type(type_code or alert_category)
+    # Per-dispatch overrides (from the Manual/SOP/Schedule form) win over the
+    # alert type's own defaults, without changing the shared type config.
+    if play_count_override is not None:
+        behavior["initial_play_count"] = play_count_override
+    if requires_ack_override is not None:
+        behavior["requires_ack"] = requires_ack_override
     receipt = {"zone_code": zone_code, "zone_name": target.get("zone_name"),
               "device_ip": device_ip, "alert_id": alert_id}
 
     if not device_ip:
         receipt.update(ok=False, edge_delivered=False, error="No device configured for zone")
     elif clip_path:
-        r = deliver_clip(clip_path, device_ip, alert_id, alert_category, language)
+        r = deliver_clip(clip_path, device_ip, alert_id, alert_category, lang, behavior=behavior)
         receipt.update(r)
     else:
-        r = call_synthesise(text, language, alert_id, zone_code, alert_category,
-                            device_ip, alert_source)
+        r = call_synthesise(text, lang, alert_id, zone_code, alert_category,
+                            device_ip, alert_source, behavior=behavior)
         receipt.update(r)
 
     _insert_log({
@@ -357,7 +418,7 @@ def _dispatch_one(target: dict, *, text, clip_path, language, alert_category,
         "alert_category": alert_category,
         "alert_source": alert_source,
         "zone_code": zone_code,
-        "lang_code": language,
+        "lang_code": lang,
         "device_ip": device_ip,
         "tts_duration_sec": round(receipt.get("tts_duration", 0.0), 3) if receipt.get("tts_duration") else None,
         "edge_delivered": 1 if receipt.get("edge_delivered") else 0,
@@ -371,7 +432,7 @@ def _dispatch_one(target: dict, *, text, clip_path, language, alert_category,
         "zone_code": zone_code,
         "zone_name": target.get("zone_name"),
         "audio_mode": audio_mode,
-        "language": language,
+        "language": lang,
         "alert_source": alert_source,
         "edge_delivered": bool(receipt.get("edge_delivered")),
         "timestamp": datetime.now().isoformat(),
@@ -380,13 +441,24 @@ def _dispatch_one(target: dict, *, text, clip_path, language, alert_category,
 
 
 def dispatch_broadcast(zone_codes: list, *, message: str = None, clip_path: str = None,
-                       language: str = "EN", alert_category: str = "Normal",
+                       language: Optional[str] = None, alert_category: str = "Normal",
                        alert_source: str = "Manual Broadcast",
                        id_base: int = BROADCAST_ID_BASE,
-                       announcement_type: str = "broadcast") -> list:
+                       announcement_type: str = "broadcast",
+                       type_code: Optional[str] = None,
+                       play_count_override: Optional[int] = None,
+                       requires_ack_override: Optional[bool] = None) -> list:
     """
     Fan out one message/clip to every zone in zone_codes in parallel.
     Returns a list of per-zone receipt dicts (see _dispatch_one).
+
+    language=None plays each zone in its own configured default language
+    (see resolve_targets/_dispatch_one). type_code selects the configured
+    alert-type behavior (play count/interval/reduction/ack) — defaults to
+    alert_category (lowercased) for backward compatibility.
+    play_count_override/requires_ack_override let one specific dispatch
+    (a Manual broadcast, a SOP step, a Schedule) override just those two
+    fields without changing the shared alert-type config.
     """
     targets = resolve_targets(zone_codes)
     if not targets:
@@ -398,7 +470,8 @@ def dispatch_broadcast(zone_codes: list, *, message: str = None, clip_path: str 
             _dispatch_one, t,
             text=message, clip_path=clip_path, language=language,
             alert_category=alert_category, alert_source=alert_source,
-            announcement_type=announcement_type,
+            announcement_type=announcement_type, type_code=type_code,
+            play_count_override=play_count_override, requires_ack_override=requires_ack_override,
             alert_id=base + i,
         ))
     return [f.result() for f in futures]

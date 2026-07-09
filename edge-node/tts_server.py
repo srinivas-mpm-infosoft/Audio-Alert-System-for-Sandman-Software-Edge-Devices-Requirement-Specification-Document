@@ -506,12 +506,57 @@ def resolve_zone(zone_id: int) -> Optional[dict]:
         return None
 
 
+_BEHAVIOR_KEYS = ('is_blocking', 'initial_play_count', 'repeat_interval_sec',
+                  'reduction_step_sec', 'min_interval_sec', 'requires_ack', 'sort_order')
+
+_DEFAULT_ALERT_TYPE_BEHAVIOR = {
+    'is_blocking': False, 'initial_play_count': 1, 'repeat_interval_sec': 60.0,
+    'reduction_step_sec': 0.0, 'min_interval_sec': 60.0, 'requires_ack': False,
+    'sort_order': 100,
+}
+
+
+def resolve_alert_type_behavior(type_code: str) -> dict:
+    """
+    Look up configured playback behavior from alert_type_configs (same table
+    dispatch_service.py's resolve_alert_type() reads — not shared code
+    between the two services, kept in sync manually, same as resolve_zone/
+    get_gateway_ip already are). Used when a caller (e.g. alert_poller.py's
+    cloud-alert path) doesn't already know its alert type's behavior and
+    didn't pass one explicitly in the /synthesise body.
+    """
+    slug = (type_code or 'normal').strip().lower().replace(' ', '_')
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM alert_type_configs WHERE type_code=%s LIMIT 1", (slug,))
+                row = cur.fetchone()
+            if not row:
+                return dict(_DEFAULT_ALERT_TYPE_BEHAVIOR)
+            return {
+                'is_blocking':         bool(row['is_blocking']),
+                'initial_play_count':  row['initial_play_count'],
+                'repeat_interval_sec': float(row['repeat_interval_sec'] or 0),
+                'reduction_step_sec':  float(row['reduction_step_sec'] or 0),
+                'min_interval_sec':    float(row['min_interval_sec'] or 0),
+                'requires_ack':        bool(row['requires_ack']),
+                'sort_order':          row['sort_order'],
+            }
+        finally:
+            conn.close()
+    except Exception as exc:
+        log.warning(f"[DB] resolve_alert_type_behavior({type_code}) failed: {exc}")
+        return dict(_DEFAULT_ALERT_TYPE_BEHAVIOR)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Edge node delivery  (SYNCHRONOUS — blocks until edge responds)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def deliver_to_edge(mp3: bytes, device_ip: str, alert_id: int,
-                    alert_category: str, lang_code: str, zone_code: str = '') -> dict:
+                    alert_category: str, lang_code: str, zone_code: str = '',
+                    behavior: Optional[dict] = None) -> dict:
     """
     POST audio to edge node /play synchronously.
     zone_code is unused here (HTTP addresses by device_ip) — accepted so
@@ -526,15 +571,14 @@ def deliver_to_edge(mp3: bytes, device_ip: str, alert_id: int,
     url = f"http://{device_ip}:{EDGE_NODE_PORT}{EDGE_NODE_PLAY}"
     log.info(f"[Edge] POST {url}  alert={alert_id}  cat={alert_category}")
     t0 = time.monotonic()
+    form = {'alert_id': str(alert_id), 'alert_category': alert_category, 'lang_code': lang_code}
+    for k, v in (behavior or {}).items():
+        form[k] = '' if v is None else str(v)
     try:
         resp = requests.post(
             url,
             files={'audio': ('alert.mp3', io.BytesIO(mp3), 'audio/mpeg')},
-            data={
-                'alert_id':       str(alert_id),
-                'alert_category': alert_category,
-                'lang_code':      lang_code,
-            },
+            data=form,
             timeout=EDGE_TIMEOUT_SEC,
         )
         elapsed = time.monotonic()-t0
@@ -629,7 +673,8 @@ def synthesise(text: str, lang_code: str,
                no_translate_words: Optional[List[str]] = None,
                alert_id: int = 0, zone_code: str = '',
                alert_category: str = 'Normal',
-               device_ip: str = '') -> dict:
+               device_ip: str = '',
+               behavior: Optional[dict] = None) -> dict:
     """
     Full pipeline. Returns receipt dict:
       mp3            : bytes
@@ -688,7 +733,8 @@ def synthesise(text: str, lang_code: str,
     # 5. Deliver to edge node (SYNCHRONOUS)
     receipt = {'edge_delivered': False, 'audio_queued': False, 'critical_active': False}
     if device_ip or zone_code:
-        receipt = deliver_to_edge(mp3, device_ip, alert_id, alert_category, lang_code, zone_code=zone_code)
+        receipt = deliver_to_edge(mp3, device_ip, alert_id, alert_category, lang_code,
+                                  zone_code=zone_code, behavior=behavior)
     else:
         log.info(f"[Synth] No device_ip/zone_code — skipping edge delivery for alert={alert_id}")
 
@@ -799,13 +845,21 @@ def synthesise_endpoint():
         return jsonify({'error':f'unsupported lang_code: {lang_code}',
                         'supported':list(LANG_MAP.keys())}),400
 
+    # Playback behavior (repeat/ack/blocking rules): dispatch_service.py resolves
+    # this itself and sends it flat in the body; other callers (e.g. alert_poller's
+    # cloud-alert path) don't know about alert types, so resolve it here instead.
+    if any(k in body for k in _BEHAVIOR_KEYS):
+        behavior = {k: body.get(k) for k in _BEHAVIOR_KEYS}
+    else:
+        behavior = resolve_alert_type_behavior(alert_category)
+
     log.info(f"[API] /synthesise  lang={lang_code}  alert={alert_id}  "
              f"cat={alert_category}  device={device_ip or 'none'}  "
              f"\"{text[:50]}\"")
 
     try:
         result = synthesise(text, lang_code, nt_words, alert_id,
-                            zone_code, alert_category, device_ip)
+                            zone_code, alert_category, device_ip, behavior)
     except Exception as exc:
         log.error(f"[API] Error: {exc}", exc_info=True)
         return jsonify({'error': str(exc)}),500

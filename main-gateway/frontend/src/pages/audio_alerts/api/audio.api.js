@@ -96,19 +96,33 @@ export async function saveAudioConfig(config) {
   return res.json();
 }
 
-// ── Alert Escalation Config ────────────────────────────────────
+// ── Alert Type Settings ─────────────────────────────────────────
 
-export async function getAlertEscalationConfig() {
-  const res = await fetch(`${targetUrl}/audio-alerts/config/alert-escalation`, { credentials: "include" });
+export async function getAlertTypes() {
+  const res = await fetch(`${targetUrl}/audio-alerts/alert-types`, { credentials: "include" });
   return res.json();
 }
 
-export async function saveAlertEscalationConfig(config) {
-  const res = await fetch(`${targetUrl}/audio-alerts/config/alert-escalation`, {
+export async function createAlertType(data) {
+  const res = await fetch(`${targetUrl}/audio-alerts/alert-types`, {
+    method: "POST", credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  return res.json();
+}
+
+export async function updateAlertType(typeCode, updates) {
+  const res = await fetch(`${targetUrl}/audio-alerts/alert-types/${typeCode}`, {
     method: "PUT", credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(config),
+    body: JSON.stringify(updates),
   });
+  return res.json();
+}
+
+export async function deleteAlertType(typeCode) {
+  const res = await fetch(`${targetUrl}/audio-alerts/alert-types/${typeCode}`, { method: "DELETE", credentials: "include" });
   return res.json();
 }
 

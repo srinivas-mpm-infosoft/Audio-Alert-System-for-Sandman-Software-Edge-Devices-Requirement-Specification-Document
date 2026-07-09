@@ -4,14 +4,24 @@ edge_node.py  —  Edge Node Audio Player
 Runs on each gateway device. Receives audio from TTS server,
 stores to disk, and plays in priority order.
 
-PRIORITY RULES:
-  Critical (0): Round-robin through ALL unacked criticals continuously.
-                Nothing else plays while any Critical is unacked.
-                If multiple criticals, each plays once per cycle (round-robin).
-  High     (1): Replay every HIGH_REPEAT_SEC (20s) until acknowledged.
-                Does not block Normal/Low between replays.
-  Normal   (2): Play once, auto-acknowledge.
-  Low      (3): Play once, auto-acknowledge.
+PLAYBACK RULES (config-driven — see AlertTypeConfig / alert_type_configs on
+the Main Gateway; each /play delivery carries the resolved behavior for its
+alert type as extra form fields):
+  is_blocking=True   : Round-robin through ALL unacked blocking items
+                        continuously. Nothing else plays while any blocking
+                        item is unacked (generalizes the old Critical rule —
+                        any type can opt into this, not just "Critical").
+  is_blocking=False  : Replayed every repeat_interval_sec until acknowledged
+                        or until initial_play_count plays are used up,
+                        whichever first. Each replay's interval shrinks by
+                        reduction_step_sec (floored at min_interval_sec).
+                        If requires_ack=False, auto-acknowledges once
+                        initial_play_count is reached; otherwise stays
+                        queued (silently) waiting for a manual acknowledge.
+                        Ordered against other non-blocking items by sort_order.
+  No behavior supplied (older caller / MQTT path): falls back to the
+  original hardcoded Critical/High/Normal/Low behavior via
+  _legacy_behavior_for_category().
 
 AUDIO FILES:
   Saved to ./audio_files/<alert_id>.mp3
@@ -71,8 +81,6 @@ ZONE_ID     = MQTT_ZONE_ID
 
 AUDIO_FILES_DIR.mkdir(parents=True, exist_ok=True)
 
-PRIORITY_MAP = {'Critical': 0, 'High': 1, 'Normal': 2, 'Low': 3}
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)-7s] %(message)s',
@@ -82,8 +90,9 @@ log = logging.getLogger(__name__)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Queue
-# Item keys: alert_id, alert_category, priority, audio_path, lang_code,
-#            seq, received_at, last_played_at, repeat_interval,
+# Item keys: alert_id, alert_category, is_blocking, sort_order, audio_path,
+#            lang_code, seq, received_at, last_played_at, repeat_interval,
+#            reduction_step, min_interval, max_plays, requires_ack,
 #            acknowledged, play_count
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -95,28 +104,25 @@ _seq        = [0]
 def _next_seq():
     _seq[0] += 1; return _seq[0]
 
-def _unacked_criticals() -> list:
+def _unacked_blocking() -> list:
     with _queue_lock:
-        return [i for i in _queue if i['priority']==0 and not i['acknowledged']]
+        return [i for i in _queue if i['is_blocking'] and not i['acknowledged']]
 
-def _due_high() -> Optional[dict]:
-    """Return oldest High alert that is due for replay."""
+def _due_nonblocking() -> Optional[dict]:
+    """Return the highest-priority (sort_order, seq) non-blocking item that's
+    due to (re)play: never played yet, or its shrinking repeat_interval has
+    elapsed — and it hasn't already used up its initial_play_count."""
     with _queue_lock:
-        highs=[i for i in _queue if i['priority']==1 and not i['acknowledged']]
+        pending=[i for i in _queue if not i['is_blocking'] and not i['acknowledged']]
     now=time.monotonic()
-    for item in sorted(highs, key=lambda x: x['seq']):
+    due=[]
+    for item in pending:
+        if item['max_plays'] is not None and item['play_count'] >= item['max_plays']:
+            continue
         last=item['last_played_at']
         if last is None or now-last >= item['repeat_interval']:
-            return item
-    return None
-
-def _next_normal() -> Optional[dict]:
-    """Return highest-priority unplayed Normal/Low item."""
-    with _queue_lock:
-        pending=[i for i in _queue
-                 if i['priority']>1 and not i['acknowledged']
-                 and i['last_played_at'] is None]
-    return min(pending, key=lambda x:(x['priority'],x['seq'])) if pending else None
+            due.append(item)
+    return min(due, key=lambda x:(x['sort_order'],x['seq'])) if due else None
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Audio device
@@ -318,11 +324,24 @@ def _play_item(item: dict) -> str:
     item['play_count']=item.get('play_count',0)+1
     result=_play_file(item['audio_path'], item['alert_id'], item['alert_category'])
     if result=='interrupted':
-        # Make the item instantly eligible to replay again — _due_high() treats
-        # last_played_at is None as "instantly due" and _next_normal() requires
-        # last_played_at is None to be selectable.
+        # Make the item instantly eligible to replay again — _due_nonblocking()
+        # treats last_played_at is None as "instantly due".
         item['last_played_at']=None
     return result
+
+def _advance_nonblocking(item: dict):
+    """After a non-blocking item plays: shrink its repeat interval (floored
+    at min_interval), then auto-acknowledge it if it has used up its
+    initial_play_count and doesn't require a manual acknowledgement."""
+    item['repeat_interval'] = max(item['repeat_interval'] - item['reduction_step'],
+                                  item['min_interval'])
+    if item['max_plays'] is None or item['play_count'] < item['max_plays'] or item['requires_ack']:
+        return
+    with _queue_lock: item['acknowledged']=True
+    log.info(f"[Queue] Auto-acked alert={item['alert_id']} ({item['alert_category']})")
+    try: os.unlink(item['audio_path'])
+    except Exception: pass
+    _remove_from_queue(item['alert_id'])
 
 def _remove_from_queue(alert_id: int) -> Optional[str]:
     """Remove item from queue, return audio_path for cleanup."""
@@ -340,13 +359,15 @@ def _remove_from_queue(alert_id: int) -> Optional[str]:
 
 def _worker():
     """
-    Priority playback:
-      1. Critical: round-robin all unacked criticals (never stop until acked)
-      2. High: play when due (every HIGH_REPEAT_SEC)
-      3. Normal/Low: play once, auto-ack
+    Config-driven playback:
+      1. Blocking types (is_blocking=True): round-robin all unacked blocking
+         items continuously — nothing else plays while any is unacked.
+      2. Non-blocking types: replay when due (shrinking interval), ordered
+         by sort_order; auto-ack once initial_play_count is used up unless
+         requires_ack is set.
     """
     log.info("[Queue] Worker started")
-    crit_idx = 0
+    block_idx = 0
 
     while True:
         # ── Live paging in progress: hold all queued playback ───────────────────
@@ -354,35 +375,24 @@ def _worker():
             time.sleep(0.2)
             continue
 
-        # ── Critical: round-robin ─────────────────────────────────────────────
-        criticals = _unacked_criticals()
-        if criticals:
-            crit_idx = crit_idx % len(criticals)
-            item     = criticals[crit_idx]
+        # ── Blocking types: round-robin ───────────────────────────────────────
+        blocking = _unacked_blocking()
+        if blocking:
+            block_idx = block_idx % len(blocking)
+            item      = blocking[block_idx]
             _play_item(item)
-            crit_idx = (crit_idx + 1) % max(len(criticals), 1)
+            block_idx = (block_idx + 1) % max(len(blocking), 1)
             continue
 
-        # ── High: replay when due ─────────────────────────────────────────────
-        high = _due_high()
-        if high:
-            _play_item(high)
-            continue
-
-        # ── Normal/Low: play once, auto-ack ──────────────────────────────────
-        normal = _next_normal()
-        if normal:
-            result = _play_item(normal)
+        # ── Non-blocking: play/replay when due ────────────────────────────────
+        item = _due_nonblocking()
+        if item:
+            result = _play_item(item)
             if result == 'interrupted':
                 # Preempted by a live page — leave it queued (already made
                 # re-eligible for replay by _play_item) and don't ack/delete.
                 continue
-            with _queue_lock: normal['acknowledged']=True
-            log.info(f"[Queue] Auto-acked alert={normal['alert_id']} "
-                     f"({normal['alert_category']})")
-            try: os.unlink(normal['audio_path'])
-            except Exception: pass
-            _remove_from_queue(normal['alert_id'])
+            _advance_nonblocking(item)
             continue
 
         # ── Clean stale acked items ───────────────────────────────────────────
@@ -405,15 +415,38 @@ app = Flask(__name__)
 sock = Sock(app)
 
 
-def _enqueue_play(alert_id: int, alert_category: str, lang_code: str, mp3_bytes: bytes) -> dict:
+# Fallback behavior when a caller doesn't send resolved AlertTypeConfig
+# fields (e.g. edge_node_mqtt.py's MQTT play subscriber, which predates the
+# config-driven engine) — reproduces the original hardcoded rules exactly.
+_LEGACY_BEHAVIOR = {
+    'Critical': {'is_blocking': True,  'initial_play_count': None, 'requires_ack': True,
+                 'repeat_interval_sec': 0.0, 'reduction_step_sec': 0.0, 'min_interval_sec': 0.0, 'sort_order': 0},
+    'High':     {'is_blocking': False, 'initial_play_count': None, 'requires_ack': True,
+                 'repeat_interval_sec': HIGH_REPEAT_SEC, 'reduction_step_sec': 0.0, 'min_interval_sec': HIGH_REPEAT_SEC, 'sort_order': 1},
+    'Normal':   {'is_blocking': False, 'initial_play_count': 1,    'requires_ack': False,
+                 'repeat_interval_sec': 60.0, 'reduction_step_sec': 0.0, 'min_interval_sec': 60.0, 'sort_order': 2},
+    'Low':      {'is_blocking': False, 'initial_play_count': 1,    'requires_ack': False,
+                 'repeat_interval_sec': 60.0, 'reduction_step_sec': 0.0, 'min_interval_sec': 60.0, 'sort_order': 3},
+}
+
+def _legacy_behavior_for_category(alert_category: str) -> dict:
+    return dict(_LEGACY_BEHAVIOR.get(alert_category, _LEGACY_BEHAVIOR['Normal']))
+
+
+def _enqueue_play(alert_id: int, alert_category: str, lang_code: str, mp3_bytes: bytes,
+                  behavior: Optional[dict] = None) -> dict:
     """
     Save audio to disk and enqueue for playback. Shared by the HTTP POST
     /play route and edge_node_mqtt.py's MQTT play subscriber — both transports
-    end up in the exact same priority queue.
+    end up in the exact same queue. `behavior` is the resolved AlertTypeConfig
+    fields (is_blocking/initial_play_count/repeat_interval_sec/reduction_step_sec/
+    min_interval_sec/requires_ack/sort_order); falls back to the legacy
+    Critical/High/Normal/Low rules if not supplied.
     """
-    priority = PRIORITY_MAP.get(alert_category, 2)
     if not mp3_bytes:
         return {'queued': False, 'reason': 'empty audio'}
+
+    b = behavior or _legacy_behavior_for_category(alert_category)
 
     # Save to disk (idempotent overwrite — harmless even if this turns out to
     # be a duplicate, since it's the same target filename either way)
@@ -426,17 +459,22 @@ def _enqueue_play(alert_id: int, alert_category: str, lang_code: str, mp3_bytes:
         return {'queued': False, 'reason': str(e)}
 
     item = {
-        'alert_id':       alert_id,
-        'alert_category': alert_category,
-        'priority':       priority,
-        'audio_path':     audio_path,
-        'lang_code':      lang_code,
-        'seq':            _next_seq(),
-        'received_at':    time.monotonic(),
-        'last_played_at': None,
-        'repeat_interval': HIGH_REPEAT_SEC if priority==1 else 60.0,
-        'acknowledged':   False,
-        'play_count':     0,
+        'alert_id':        alert_id,
+        'alert_category':  alert_category,
+        'is_blocking':     bool(b.get('is_blocking', False)),
+        'sort_order':      b.get('sort_order') if b.get('sort_order') is not None else 100,
+        'audio_path':      audio_path,
+        'lang_code':       lang_code,
+        'seq':             _next_seq(),
+        'received_at':     time.monotonic(),
+        'last_played_at':  None,
+        'repeat_interval': float(b.get('repeat_interval_sec') or 0),
+        'reduction_step':  float(b.get('reduction_step_sec') or 0),
+        'min_interval':    float(b.get('min_interval_sec') or 0),
+        'max_plays':       b.get('initial_play_count'),
+        'requires_ack':    bool(b.get('requires_ack', False)),
+        'acknowledged':    False,
+        'play_count':      0,
     }
 
     # Duplicate-check AND append in a single critical section so two
@@ -445,19 +483,19 @@ def _enqueue_play(alert_id: int, alert_category: str, lang_code: str, mp3_bytes:
     with _queue_lock:
         if any(i['alert_id']==alert_id and not i['acknowledged'] for i in _queue):
             log.info(f"[Queue] alert={alert_id} already queued")
-            return {'queued': False, 'reason': 'duplicate', 'critical_active': bool(_unacked_criticals())}
+            return {'queued': False, 'reason': 'duplicate', 'critical_active': bool(_unacked_blocking())}
         _queue.append(item); depth=len(_queue)
 
     log.info(f"[Queue] Enqueued alert={alert_id} cat={alert_category} "
-             f"priority={priority}  depth={depth}")
+             f"blocking={item['is_blocking']}  depth={depth}")
 
     return {
         'queued':          True,
         'alert_id':        alert_id,
         'alert_category':  alert_category,
-        'priority':        priority,
+        'is_blocking':     item['is_blocking'],
         'queue_depth':     depth,
-        'critical_active': bool(_unacked_criticals()),
+        'critical_active': bool(_unacked_blocking()),
     }
 
 
@@ -485,8 +523,22 @@ def _do_acknowledge(alert_id: int) -> dict:
     return {
         'acknowledged':   removed,
         'alert_id':       alert_id,
-        'critical_active': bool(_unacked_criticals()),
+        'critical_active': bool(_unacked_blocking()),
     }
+
+
+def _form_bool(v) -> bool:
+    return str(v).strip().lower() in ('1', 'true', 'yes')
+
+def _form_float(v, default: float) -> float:
+    if v is None or v == '': return default
+    try: return float(v)
+    except (TypeError, ValueError): return default
+
+def _form_int_or_none(v) -> Optional[int]:
+    if v is None or v == '': return None
+    try: return int(float(v))
+    except (TypeError, ValueError): return None
 
 
 @app.route('/play', methods=['POST'])
@@ -498,8 +550,12 @@ def play():
     Multipart form:
       audio          : MP3 file
       alert_id       : int
-      alert_category : Critical | High | Normal | Low
+      alert_category : str (label only — playback rules come from behavior fields below)
       lang_code      : str
+      is_blocking, initial_play_count, repeat_interval_sec, reduction_step_sec,
+      min_interval_sec, requires_ack, sort_order : resolved AlertTypeConfig
+      behavior fields (optional — falls back to legacy Critical/High/Normal/Low
+      rules for alert_category if omitted).
     """
     if 'audio' not in request.files:
         return jsonify({'error': 'audio file required'}), 400
@@ -512,7 +568,19 @@ def play():
     if not mp3_bytes:
         return jsonify({'error': 'empty audio'}), 400
 
-    return jsonify(_enqueue_play(alert_id, alert_category, lang_code, mp3_bytes))
+    behavior = None
+    if 'is_blocking' in request.form:
+        behavior = {
+            'is_blocking':         _form_bool(request.form.get('is_blocking')),
+            'initial_play_count':  _form_int_or_none(request.form.get('initial_play_count')),
+            'repeat_interval_sec': _form_float(request.form.get('repeat_interval_sec'), 60.0),
+            'reduction_step_sec':  _form_float(request.form.get('reduction_step_sec'), 0.0),
+            'min_interval_sec':    _form_float(request.form.get('min_interval_sec'), 0.0),
+            'requires_ack':        _form_bool(request.form.get('requires_ack')),
+            'sort_order':          _form_int_or_none(request.form.get('sort_order')),
+        }
+
+    return jsonify(_enqueue_play(alert_id, alert_category, lang_code, mp3_bytes, behavior))
 
 
 @app.route('/acknowledge', methods=['POST'])
@@ -527,6 +595,23 @@ def acknowledge():
         return jsonify({'error': 'alert_id required'}), 400
 
     return jsonify(_do_acknowledge(alert_id))
+
+
+@app.route('/acknowledge-all', methods=['POST'])
+def acknowledge_all():
+    """
+    Silence everything currently queued on this node right now — the local
+    dashboard's "Acknowledge All" emergency override (e.g. a pile-up of
+    blocking Critical alerts). Local queue clear only: if the current item
+    happens to be an active SOP step, the gateway's SopExecution isn't told,
+    so it stays WAITING_FOR_ACKNOWLEDGEMENT until it times out and replays —
+    use the SOP card's own Acknowledge button for that case instead.
+    """
+    with _queue_lock:
+        alert_ids = [i['alert_id'] for i in _queue]
+    for alert_id in alert_ids:
+        _do_acknowledge(alert_id)
+    return jsonify({'acknowledged_count': len(alert_ids), 'critical_active': bool(_unacked_blocking())})
 
 
 @app.route('/increase-frequency', methods=['POST'])
@@ -561,7 +646,7 @@ def queue_status():
         items=[{k:v for k,v in i.items() if k!='audio_path'} for i in _queue]
     return jsonify({
         'depth':            len(items),
-        'critical_active':  bool(_unacked_criticals()),
+        'critical_active':  bool(_unacked_blocking()),
         'currently_playing': _playing[0],
         'items':            items,
     })
@@ -596,7 +681,7 @@ def health():
     return jsonify({
         'status':            'ok',
         'queue_depth':       depth,
-        'critical_active':   bool(_unacked_criticals()),
+        'critical_active':   bool(_unacked_blocking()),
         'currently_playing': _playing[0],
         'audio_device':      _get_audio_device() or 'default',
         'high_repeat_sec':   HIGH_REPEAT_SEC,
@@ -726,6 +811,13 @@ def dashboard_alert_info():
     return jsonify(_gateway('GET', '/audio-alerts/edge/alert-info', params={'alert_id': alert_id}))
 
 
+@app.route('/dashboard/playback-logs', methods=['GET'])
+def dashboard_playback_logs():
+    if not ZONE_ID:
+        return jsonify({'ok': False, 'error': 'ZONE_ID (MQTT_ZONE_ID) not configured on this node'}), 400
+    return jsonify(_gateway('GET', '/audio-alerts/edge/playback-logs', params={'zone': ZONE_ID, 'limit': 20}))
+
+
 @app.route('/dashboard/sop-status', methods=['GET'])
 def dashboard_sop_status():
     if not ZONE_ID:
@@ -742,6 +834,18 @@ def dashboard_sop_ack():
     if not execution_id:
         return jsonify({'ok': False, 'error': 'execution_id required'}), 400
     return jsonify(_gateway('POST', '/audio-alerts/edge/sop-ack', timeout=8,
+                             json={'execution_id': execution_id, 'zone_code': ZONE_ID}))
+
+
+@app.route('/dashboard/sop-repeat', methods=['POST'])
+def dashboard_sop_repeat():
+    if not ZONE_ID:
+        return jsonify({'ok': False, 'error': 'ZONE_ID (MQTT_ZONE_ID) not configured on this node'}), 400
+    body = request.get_json(force=True, silent=True) or {}
+    execution_id = body.get('execution_id')
+    if not execution_id:
+        return jsonify({'ok': False, 'error': 'execution_id required'}), 400
+    return jsonify(_gateway('POST', '/audio-alerts/edge/sop-repeat', timeout=8,
                              json={'execution_id': execution_id, 'zone_code': ZONE_ID}))
 
 
@@ -766,6 +870,8 @@ _DASHBOARD_HTML = """<!doctype html>
   .pill.idle { background: #1e293b; color: #94a3b8; border: 1px solid #334155; }
   button { background: #6366f1; color: white; border: none; border-radius: 8px; padding: 10px 18px; font-size: 14px; font-weight: 600; cursor: pointer; }
   button:disabled { background: #475569; cursor: not-allowed; }
+  button.btn-secondary { background: transparent; border: 1px solid #334155; color: #cbd5e1; margin-left: 8px; }
+  button.btn-secondary:disabled { background: transparent; color: #475569; border-color: #334155; }
   .msg { font-size: 13px; color: #cbd5e1; margin-top: 8px; line-height: 1.4; }
   .ack-state { font-size: 12px; margin-top: 8px; }
   .ack-state.pending { color: #fbbf24; }
@@ -783,6 +889,8 @@ _DASHBOARD_HTML = """<!doctype html>
     <div class="row"><span class="k">Name</span><span id="npName">—</span></div>
     <div class="row"><span class="k">Playback status</span><span id="npStatus" class="pill idle">idle</span></div>
     <div class="row"><span class="k">Queue depth</span><span id="npQueue">0</span></div>
+    <button id="ackAllBtn" class="btn-secondary" style="margin-top:10px;margin-left:0">Acknowledge All</button>
+    <div id="ackAllState" class="ack-state"></div>
   </div>
 
   <div class="card">
@@ -803,6 +911,11 @@ _DASHBOARD_HTML = """<!doctype html>
     <div class="row"><span class="k">CPU temp</span><span id="cpuTemp">—</span></div>
     <div class="row"><span class="k">Memory used</span><span id="memPct">—</span></div>
     <div class="row"><span class="k">Uptime</span><span id="uptime">—</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Playback Logs</h2>
+    <div id="logsList" style="font-size:13px;color:#94a3b8">Loading…</div>
   </div>
 
 <script>
@@ -895,8 +1008,11 @@ async function refreshSop() {
 
   const ackArea = document.getElementById('sopAckArea');
   if (ex.needs_ack && !ackInFlight) {
-    ackArea.innerHTML = '<button id="ackBtn">Acknowledge</button><div id="ackState" class="ack-state"></div>';
+    ackArea.innerHTML = '<button id="ackBtn">Acknowledge</button>' +
+      '<button id="repeatBtn" class="btn-secondary">Repeat</button>' +
+      '<div id="ackState" class="ack-state"></div>';
     document.getElementById('ackBtn').onclick = () => doAck(ex.id);
+    document.getElementById('repeatBtn').onclick = () => doRepeat(ex.id);
   } else if (!ex.needs_ack) {
     ackArea.innerHTML = '';
   }
@@ -907,7 +1023,9 @@ async function doAck(executionId) {
   ackInFlight = true;
   const ackState = document.getElementById('ackState');
   const btn = document.getElementById('ackBtn');
+  const repeatBtn = document.getElementById('repeatBtn');
   if (btn) btn.disabled = true;
+  if (repeatBtn) repeatBtn.disabled = true;
   if (ackState) { ackState.textContent = 'Sending acknowledgement…'; ackState.className = 'ack-state pending'; }
 
   const res = await fetchJSON('/dashboard/sop-ack', {
@@ -921,14 +1039,78 @@ async function doAck(executionId) {
   } else {
     if (ackState) { ackState.textContent = 'Failed: ' + (res.error || 'unknown error'); ackState.className = 'ack-state error'; }
     if (btn) btn.disabled = false;
+    if (repeatBtn) repeatBtn.disabled = false;
   }
   ackInFlight = false;
   setTimeout(refreshSop, 1000);
 }
 
-refreshHealth(); refreshSop();
+async function doRepeat(executionId) {
+  if (ackInFlight) return;
+  ackInFlight = true;
+  const ackState = document.getElementById('ackState');
+  const btn = document.getElementById('ackBtn');
+  const repeatBtn = document.getElementById('repeatBtn');
+  if (btn) btn.disabled = true;
+  if (repeatBtn) repeatBtn.disabled = true;
+  if (ackState) { ackState.textContent = 'Repeating step…'; ackState.className = 'ack-state pending'; }
+
+  const res = await fetchJSON('/dashboard/sop-repeat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ execution_id: executionId }),
+  });
+
+  if (res.ok) {
+    if (ackState) { ackState.textContent = 'Step repeated'; ackState.className = 'ack-state success'; }
+  } else {
+    if (ackState) { ackState.textContent = 'Failed: ' + (res.error || 'unknown error'); ackState.className = 'ack-state error'; }
+  }
+  if (btn) btn.disabled = false;
+  if (repeatBtn) repeatBtn.disabled = false;
+  ackInFlight = false;
+  setTimeout(refreshSop, 1000);
+}
+
+async function doAckAll() {
+  const btn = document.getElementById('ackAllBtn');
+  const state = document.getElementById('ackAllState');
+  if (btn) btn.disabled = true;
+  if (state) { state.textContent = 'Acknowledging everything…'; state.className = 'ack-state pending'; }
+  const res = await fetchJSON('/acknowledge-all', { method: 'POST' });
+  if (state) {
+    state.textContent = 'Acknowledged ' + (res.acknowledged_count ?? 0) + ' item(s)';
+    state.className = 'ack-state success';
+  }
+  if (btn) btn.disabled = false;
+  refreshHealth();
+}
+document.getElementById('ackAllBtn').onclick = doAckAll;
+
+function fmtLogTime(iso) {
+  if (!iso) return '—';
+  try { return new Date(iso).toLocaleString(); } catch (e) { return iso; }
+}
+
+async function refreshLogs() {
+  const el = document.getElementById('logsList');
+  const res = await fetchJSON('/dashboard/playback-logs');
+  if (!res.ok) { el.textContent = res.error || 'Unavailable'; return; }
+  const rows = res.data || [];
+  if (rows.length === 0) { el.textContent = 'No playback history for this zone yet.'; return; }
+  el.innerHTML = rows.map((r) => (
+    '<div class="row" style="border-bottom:1px solid #1e293b;padding:6px 0">' +
+      '<span class="k">' + fmtLogTime(r.timestamp) + ' — ' + (r.alert_category || 'alert') +
+      ' (' + (r.announcement_type || '—') + ')</span>' +
+      '<span class="pill ' + (r.edge_delivered ? 'ok' : 'bad') + '">' + (r.edge_delivered ? 'delivered' : 'failed') + '</span>' +
+    '</div>'
+  )).join('');
+}
+
+refreshHealth(); refreshSop(); refreshLogs();
 setInterval(refreshHealth, 3000);
 setInterval(refreshSop, 3000);
+setInterval(refreshLogs, 15000);
 </script>
 </body>
 </html>
@@ -950,9 +1132,8 @@ if __name__=='__main__':
     log.info("  Edge Node")
     log.info(f"  Listen    : http://{SERVER_HOST}:{SERVER_PORT}")
     log.info(f"  Audio dir : {AUDIO_FILES_DIR}")
-    log.info(f"  Critical  : round-robin until all acked")
-    log.info(f"  High      : replay every {HIGH_REPEAT_SEC}s until acked")
-    log.info(f"  Normal/Low: play once, auto-ack")
-    log.info(f"  Priority  : Critical>High>Normal>Low")
+    log.info(f"  Playback  : config-driven (see AlertTypeConfig on the Main Gateway)")
+    log.info(f"  Legacy fallback if no behavior sent — Critical: blocking round-robin, "
+             f"High: replay every {HIGH_REPEAT_SEC}s, Normal/Low: play once")
     log.info("="*55)
     app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)

@@ -89,6 +89,8 @@ export const PERMISSIONS = [
   { id: "aa.sop.delete", label: "Delete SOPs", category: "SOP" },
   { id: "aa.sop.run", label: "Start / cancel SOP executions", category: "SOP" },
   { id: "aa.sop.ack", label: "Acknowledge SOP steps", category: "SOP" },
+  { id: "aa.alerttypes.view", label: "View alert type settings", category: "Audio" },
+  { id: "aa.alerttypes.manage", label: "Manage alert type settings", category: "Audio" },
 ];
 
 export const ROLE_PERMISSIONS = {
@@ -102,6 +104,7 @@ export const ROLE_PERMISSIONS = {
     "aa.logs.view", "aa.logs.export", "aa.audit.view",
     "aa.schedule.view", "aa.schedule.edit", "aa.paging.use",
     "aa.sop.view", "aa.sop.edit", "aa.sop.delete", "aa.sop.run", "aa.sop.ack",
+    "aa.alerttypes.view", "aa.alerttypes.manage",
   ]),
   process_engineer: new Set([
     "aa.live.view", "aa.alerts.ack", "aa.broadcast.manual",

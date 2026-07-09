@@ -37,19 +37,22 @@ const IO_SUB_ITEMS = [
 const IO_PANEL_IDS = new Set(IO_SUB_ITEMS.map((i) => i.id));
 
 // aa-access removed — User Management is now a top-level nav item
+// Grouped for foundry-floor usability: what's happening now, how to send an
+// alert, how to plan one ahead, rarely-touched setup, then after-the-fact review.
 const AA_SUB_ITEMS = [
-  { id: "aa-live",      icon: Activity,  label: "Live Monitor",    perm: "aa.live.view" },
-  { id: "aa-broadcast", icon: Megaphone, label: "Manual Broadcast", perm: "aa.broadcast.manual" },
-  { id: "aa-paging",    icon: Mic,       label: "Live Paging",     perm: "aa.paging.use" },
+  { id: "aa-live",       icon: Activity,      label: "Live Monitor",     perm: "aa.live.view",        group: "Monitor" },
+  { id: "aa-broadcast",  icon: Megaphone,     label: "Manual Broadcast", perm: "aa.broadcast.manual", group: "Send Alert" },
+  { id: "aa-paging",     icon: Mic,           label: "Live Paging",      perm: "aa.paging.use",       group: "Send Alert" },
+  { id: "aa-sop",        icon: ListChecks,    label: "SOP Guidance",     perm: "aa.sop.view",         group: "Send Alert" },
   // Rule Builder hidden from navigation for now — kept here (commented) for easy re-enable.
-  // { id: "aa-rules",     icon: Sliders,   label: "Rule Builder",    perm: "aa.rules.view" },
-  { id: "aa-schedule",  icon: CalendarClock, label: "Schedule",    perm: "aa.schedule.view" },
-  { id: "aa-sop",       icon: ListChecks, label: "SOP Guidance",  perm: "aa.sop.view" },
-  { id: "aa-audio",     icon: Volume2,   label: "Audio Config",    perm: "aa.audio.upload" },
-  { id: "aa-devices",   icon: Cpu,       label: "Devices & Zones", perm: "aa.devices.view" },
-  { id: "aa-analytics", icon: BarChart3, label: "Analytics",       perm: "aa.analytics.view" },
-  { id: "aa-logs",      icon: FileText,  label: "Logs",    perm: "aa.logs.view" },
-  { id: "aa-settings",  icon: Settings2, label: "App Settings",    perm: "aa.users.manage" },
+  // { id: "aa-rules",     icon: Sliders,   label: "Rule Builder",    perm: "aa.rules.view", group: "Send Alert" },
+  { id: "aa-schedule",   icon: CalendarClock, label: "Schedule",         perm: "aa.schedule.view",    group: "Plan Ahead" },
+  { id: "aa-devices",    icon: Cpu,           label: "Devices & Zones",  perm: "aa.devices.view",     group: "Setup" },
+  { id: "aa-audio",      icon: Volume2,       label: "Audio Config",     perm: "aa.audio.upload",     group: "Setup" },
+  { id: "aa-alerttypes", icon: Sliders,       label: "Alert Types",      perm: "aa.alerttypes.view",  group: "Setup" },
+  { id: "aa-settings",   icon: Settings2,     label: "App Settings",     perm: "aa.users.manage",     group: "Setup" },
+  { id: "aa-analytics",  icon: BarChart3,     label: "Analytics",        perm: "aa.analytics.view",   group: "Reports" },
+  { id: "aa-logs",       icon: FileText,      label: "Logs",             perm: "aa.logs.view",        group: "Reports" },
 ];
 
 const AA_PANEL_IDS = new Set(AA_SUB_ITEMS.map((i) => i.id));
@@ -86,6 +89,7 @@ export default function Sidebar({ active, onSelect, role }) {
     return Array.isArray(perms) ? perms.includes(perm) : false;
   };
   const allowedAASubs = AA_SUB_ITEMS.filter((sub) => can(sub.perm));
+  const aaGroupCount = new Set(allowedAASubs.map((s) => s.group)).size;
 
   return (
     <nav
@@ -180,26 +184,37 @@ export default function Sidebar({ active, onSelect, role }) {
                   />
                 </button>
 
-                <div style={{ maxHeight: aaOpen ? `${allowedAASubs.length * 38}px` : "0px", overflow: "hidden", transition: "max-height 0.2s ease" }}>
+                <div style={{ maxHeight: aaOpen ? `${allowedAASubs.length * 38 + aaGroupCount * 22}px` : "0px", overflow: "hidden", transition: "max-height 0.2s ease" }}>
                   <div className="mt-0.5 ml-3 pl-3 space-y-0.5" style={{ borderLeft: "1px solid #1f2937" }}>
-                    {allowedAASubs.map((sub) => {
-                      const SubIcon  = sub.icon;
-                      const isActive = active === sub.id;
-                      return (
-                        <button
-                          key={sub.id}
-                          onClick={() => onSelect(sub.id)}
-                          className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded text-[12.5px] font-medium transition-colors duration-100"
-                          style={isActive ? { background: "#1e3a5f33", color: "#93c5fd" } : { color: "#4b5563" }}
-                          onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.color = "#9ca3af"; }}
-                          onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.color = "#4b5563"; }}
-                        >
-                          <SubIcon size={12} style={{ color: isActive ? "#60a5fa" : "#374151" }} aria-hidden="true" />
-                          {sub.label}
-                          {isActive && <span className="ml-auto rounded-full flex-shrink-0" style={{ width: 5, height: 5, background: "#3b82f6" }} aria-hidden="true" />}
-                        </button>
-                      );
-                    })}
+                    {(() => {
+                      let lastGroup = null;
+                      return allowedAASubs.map((sub) => {
+                        const SubIcon    = sub.icon;
+                        const isActive   = active === sub.id;
+                        const showHeader = sub.group !== lastGroup;
+                        lastGroup = sub.group;
+                        return (
+                          <React.Fragment key={sub.id}>
+                            {showHeader && (
+                              <div className="pt-2 pb-0.5 px-2.5 text-[9.5px] font-bold uppercase tracking-widest" style={{ color: "#4b5563" }}>
+                                {sub.group}
+                              </div>
+                            )}
+                            <button
+                              onClick={() => onSelect(sub.id)}
+                              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded text-[12.5px] font-medium transition-colors duration-100"
+                              style={isActive ? { background: "#1e3a5f33", color: "#93c5fd" } : { color: "#4b5563" }}
+                              onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.color = "#9ca3af"; }}
+                              onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.color = "#4b5563"; }}
+                            >
+                              <SubIcon size={12} style={{ color: isActive ? "#60a5fa" : "#374151" }} aria-hidden="true" />
+                              {sub.label}
+                              {isActive && <span className="ml-auto rounded-full shrink-0" style={{ width: 5, height: 5, background: "#3b82f6" }} aria-hidden="true" />}
+                            </button>
+                          </React.Fragment>
+                        );
+                      });
+                    })()}
                   </div>
                 </div>
               </li>

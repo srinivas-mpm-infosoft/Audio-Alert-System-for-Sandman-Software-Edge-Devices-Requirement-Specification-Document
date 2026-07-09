@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Upload, Trash2, Plus, Loader2, Volume2, Pencil, Bell } from "lucide-react";
-import { getClips, uploadClip, updateClip, deleteClip, getTemplates, createTemplate, updateTemplate, deleteTemplate, saveAudioConfig, getAlertEscalationConfig, saveAlertEscalationConfig } from "./api/audio.api";
+import { Upload, Trash2, Plus, Loader2, Volume2, Pencil } from "lucide-react";
+import { getClips, uploadClip, updateClip, deleteClip, getTemplates, createTemplate, updateTemplate, deleteTemplate, saveAudioConfig } from "./api/audio.api";
 import { getZones, updateZone } from "./api/devices.api";
 import { useAudioConfigStore } from "../../store/useAudioConfigStore";
 import { useCan } from "./hooks/useCan";
@@ -14,7 +14,7 @@ import { formatFileSize, formatDate } from "./utils/formatters";
 import AudioPreviewButton from "./components/AudioPreviewButton";
 
 //const TABS_FULL = ["Voice Library", "TTS Templates", "Zones & Languages", "Volume & Audio Types"];
-const TABS = ["Voice Library", "Zones & Languages", "Alert Configuration"];
+const TABS = ["Voice Library", "Zones & Languages", "Volume & Audio"];
 const INPUT = "w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 focus:border-zinc-400 text-slate-700";
 const LABEL = "text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block";
 
@@ -37,13 +37,6 @@ export default function AudioConfig() {
   const [editingTpl, setEditingTpl] = useState(null);
   const [audioSaving, setAudioSaving] = useState(false);
   const [zoneSaving, setZoneSaving] = useState(false);
-  const [escalationConfig, setEscalationConfig] = useState({
-    initial_interval_sec: 60,
-    escalation_after_sec: 120,
-    reduction_step_sec: 30,
-    min_interval_sec: 10,
-  });
-  const [escalationSaving, setEscalationSaving] = useState(false);
   const fileRef = useRef(null);
   const editFileRef = useRef(null);
 
@@ -58,11 +51,10 @@ export default function AudioConfig() {
 
   useEffect(() => {
     setLoading(true);
-    Promise.all([getClips(), getTemplates(), getZones(), getAlertEscalationConfig()]).then(([cr, tr, zr, ecr]) => {
+    Promise.all([getClips(), getTemplates(), getZones()]).then(([cr, tr, zr]) => {
       if (cr.ok) setClips(cr.data);
       if (tr.ok) setTemplates(tr.data);
       if (zr.ok) setZones(zr.data);
-      if (ecr.ok) setEscalationConfig(ecr.data);
       setLoading(false);
     });
   }, []);
@@ -202,32 +194,6 @@ export default function AudioConfig() {
     setAudioSaving(false);
     if (res.ok) { markClean(); showToast("Audio settings saved", "success"); }
     else showToast("Save failed", "error");
-  };
-
-  // ── Alert Escalation ──────────────────────────────────────
-
-  const handleSaveEscalation = async () => {
-    setEscalationSaving(true);
-    const res = await saveAlertEscalationConfig(escalationConfig);
-    setEscalationSaving(false);
-    if (res.ok) showToast("Alert escalation config saved", "success");
-    else showToast("Save failed", "error");
-  };
-
-  const escalationPreviewRows = () => {
-    const { initial_interval_sec, escalation_after_sec, reduction_step_sec, min_interval_sec } = escalationConfig;
-    const rows = [];
-    let interval = initial_interval_sec;
-    rows.push({ label: "Initial trigger", interval, note: "" });
-    rows.push({ label: `After ${escalation_after_sec}s unacknowledged`, interval: Math.max(min_interval_sec, interval - reduction_step_sec), note: "1st reduction" });
-    let next = Math.max(min_interval_sec, interval - reduction_step_sec);
-    for (let i = 2; i <= 4; i++) {
-      const reduced = Math.max(min_interval_sec, next - reduction_step_sec);
-      rows.push({ label: `Cycle ${i + 1} unacknowledged`, interval: reduced, note: reduced === min_interval_sec ? "at minimum" : "" });
-      if (reduced === min_interval_sec) break;
-      next = reduced;
-    }
-    return rows;
   };
 
   // ── Render ─────────────────────────────────────────────────
@@ -418,100 +384,7 @@ export default function AudioConfig() {
             </div>
           )}
 
-          {/* D. Alert Configuration */}
-          {tab === 2 && (
-            <div className="flex flex-col gap-6">
-              <div className="flex items-center gap-2 pb-3 border-b border-slate-100">
-                <Bell size={16} className="text-amber-500" />
-                <div>
-                  <p className="text-sm font-semibold text-slate-800">High Priority Alert Escalation</p>
-                  <p className="text-xs text-slate-400 mt-0.5">Configure how the repeat interval reduces over time for unacknowledged HIGH category alerts.</p>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                <div>
-                  <label className={LABEL} htmlFor="esc-initial">Initial Interval (seconds)</label>
-                  <input
-                    id="esc-initial" type="number" min={1} max={3600}
-                    value={escalationConfig.initial_interval_sec}
-                    onChange={(e) => setEscalationConfig((c) => ({ ...c, initial_interval_sec: Math.max(1, +e.target.value || 1) }))}
-                    className={INPUT}
-                  />
-                  <p className="text-[10px] text-slate-400 mt-1">How often (in seconds) the alert repeats initially when unacknowledged.</p>
-                </div>
-
-                <div>
-                  <label className={LABEL} htmlFor="esc-after">Start Escalating After (seconds)</label>
-                  <input
-                    id="esc-after" type="number" min={1} max={86400}
-                    value={escalationConfig.escalation_after_sec}
-                    onChange={(e) => setEscalationConfig((c) => ({ ...c, escalation_after_sec: Math.max(1, +e.target.value || 1) }))}
-                    className={INPUT}
-                  />
-                  <p className="text-[10px] text-slate-400 mt-1">Total unacknowledged time before the interval starts reducing (e.g. 120 = after 2 minutes).</p>
-                </div>
-
-                <div>
-                  <label className={LABEL} htmlFor="esc-step">Reduction Step (seconds)</label>
-                  <input
-                    id="esc-step" type="number" min={1} max={3600}
-                    value={escalationConfig.reduction_step_sec}
-                    onChange={(e) => setEscalationConfig((c) => ({ ...c, reduction_step_sec: Math.max(1, +e.target.value || 1) }))}
-                    className={INPUT}
-                  />
-                  <p className="text-[10px] text-slate-400 mt-1">How many seconds to reduce the interval by each unacknowledged cycle.</p>
-                </div>
-
-                <div>
-                  <label className={LABEL} htmlFor="esc-min">Minimum Interval (seconds)</label>
-                  <input
-                    id="esc-min" type="number" min={1} max={3600}
-                    value={escalationConfig.min_interval_sec}
-                    onChange={(e) => setEscalationConfig((c) => ({ ...c, min_interval_sec: Math.max(1, +e.target.value || 1) }))}
-                    className={INPUT}
-                  />
-                  <p className="text-[10px] text-slate-400 mt-1">Floor — the interval will never drop below this value.</p>
-                </div>
-              </div>
-
-              {/* Trend Preview */}
-              <div>
-                <p className={LABEL}>Escalation Trend Preview</p>
-                <div className="rounded-xl border border-slate-100 overflow-hidden">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="bg-slate-50 border-b border-slate-100">
-                        <th className="px-4 py-2.5 text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Stage</th>
-                        <th className="px-4 py-2.5 text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Repeat Interval</th>
-                        <th className="px-4 py-2.5 text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Note</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-50">
-                      {escalationPreviewRows().map((row, i) => (
-                        <tr key={i} className={i === 0 ? "bg-white" : "bg-amber-50/30"}>
-                          <td className="px-4 py-2.5 text-slate-700 text-xs">{row.label}</td>
-                          <td className="px-4 py-2.5">
-                            <span className="font-bold text-indigo-700 font-mono text-sm">{row.interval}s</span>
-                          </td>
-                          <td className="px-4 py-2.5 text-[11px] text-slate-400">{row.note}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              <div className="flex justify-end pt-2 border-t border-slate-100">
-                <button type="button" onClick={handleSaveEscalation} disabled={escalationSaving}
-                  className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50 inline-flex items-center gap-2">
-                  {escalationSaving ? <><Loader2 size={14} className="animate-spin" /> Saving…</> : <><Bell size={14} /> Save Alert Config</>}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* E. Volume & Audio Types */}
+          {/* D. Volume & Audio Types */}
           {tab === 2 && (
             <div className="flex flex-col gap-6">
               <div>

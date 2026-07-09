@@ -68,3 +68,8 @@ export async function cancelSopExecution(executionId) {
   const res = await fetch(`${targetUrl}/audio-alerts/sops/executions/${executionId}/cancel`, { method: "POST", credentials: "include" });
   return res.json();
 }
+
+export async function repeatSopStep(executionId) {
+  const res = await fetch(`${targetUrl}/audio-alerts/sops/executions/${executionId}/repeat`, { method: "POST", credentials: "include" });
+  return res.json();
+}

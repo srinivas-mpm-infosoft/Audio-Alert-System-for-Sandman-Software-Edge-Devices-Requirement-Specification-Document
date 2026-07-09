@@ -3,6 +3,7 @@ import { ArrowLeft, Save, Loader2, Plus, Trash2, ChevronUp, ChevronDown, Upload,
 import ZonePicker from "./components/ZonePicker";
 import LanguagePicker from "./components/LanguagePicker";
 import AudioPreviewButton from "./components/AudioPreviewButton";
+import AlertTypeOverrideFields from "./components/AlertTypeOverrideFields";
 import { getClips, uploadClip } from "./api/audio.api";
 
 const INPUT = "w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 focus:border-zinc-400 text-slate-700";
@@ -10,7 +11,10 @@ const LABEL = "text-[10px] font-bold text-slate-400 uppercase tracking-widest mb
 const SECTION = "bg-white rounded-xl border border-slate-200 shadow-sm p-5 flex flex-col gap-4";
 
 function blankStep() {
-  return { title: "", audio_mode: "text", message: "", clip_id: "", language: "EN" };
+  return {
+    title: "", audio_mode: "text", message: "", clip_id: "", language: null,
+    type_code: null, play_count_override: null, requires_ack_override: null,
+  };
 }
 
 function blank(initial) {
@@ -64,7 +68,7 @@ function StepEditor({ step, index, total, clips, onChange, onRemove, onMoveUp, o
             <label className={LABEL}>Step Message</label>
             <textarea rows={2} className={`${INPUT} resize-none`} value={step.message} onChange={(e) => set("message", e.target.value)} placeholder="What the system should say for this step…" />
           </div>
-          <LanguagePicker value={step.language} onChange={(v) => set("language", v)} label="Language" />
+          <LanguagePicker value={step.language} onChange={(v) => set("language", v)} label="Language" includeZoneDefault />
         </div>
       ) : (
         <div className="flex flex-col gap-2">
@@ -86,6 +90,12 @@ function StepEditor({ step, index, total, clips, onChange, onRemove, onMoveUp, o
           </div>
         </div>
       )}
+
+      <AlertTypeOverrideFields
+        value={step}
+        onChange={onChange}
+        typeLabel="Alert Type" defaultTypeLabel="Default (High)"
+      />
     </div>
   );
 }
@@ -156,6 +166,9 @@ export default function SopForm({ initialSop, onSave, onCancel }) {
           message: s.audio_mode === "text" ? s.message.trim() : null,
           clip_id: s.audio_mode === "clip" ? s.clip_id : null,
           language: s.language,
+          type_code: s.type_code,
+          play_count_override: s.play_count_override,
+          requires_ack_override: s.requires_ack_override,
         })),
       };
       const res = await onSave(payload);

@@ -34,6 +34,7 @@ const AA_SUB_TAB_MAP = {
   "aa-schedule":  "schedule",
   "aa-sop":       "sop",
   "aa-audio":     "audio",
+  "aa-alerttypes": "alerttypes",
   "aa-devices":   "devices",
   "aa-analytics": "analytics",
   "aa-logs":      "logs",

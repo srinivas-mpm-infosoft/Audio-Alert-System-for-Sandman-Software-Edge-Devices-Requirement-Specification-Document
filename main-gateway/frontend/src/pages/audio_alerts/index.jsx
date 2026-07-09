@@ -10,6 +10,7 @@ import LivePaging from "./LivePaging";
 import Schedule from "./Schedule";
 import Sop from "./Sop";
 import AudioConfig from "./AudioConfig";
+import AlertTypeSettings from "./AlertTypeSettings";
 import DevicesZones from "./DevicesZones";
 import Analytics from "./Analytics";
 import LogsAudit from "./LogsAudit";
@@ -27,6 +28,7 @@ const SUB_TAB_MAP = {
   schedule:  Schedule,
   sop:       Sop,
   audio:     AudioConfig,
+  alerttypes: AlertTypeSettings,
   devices:   DevicesZones,
   analytics: Analytics,
   logs:      LogsAudit,
@@ -56,6 +58,7 @@ export default function AudioAlerts({ subTab = "live", user }) {
     schedule:  "aa.schedule.view",
     sop:       "aa.sop.view",
     audio:     "aa.audio.upload",
+    alerttypes: "aa.alerttypes.view",
     devices:   "aa.devices.view",
     analytics: "aa.analytics.view",
     logs:      "aa.logs.view",

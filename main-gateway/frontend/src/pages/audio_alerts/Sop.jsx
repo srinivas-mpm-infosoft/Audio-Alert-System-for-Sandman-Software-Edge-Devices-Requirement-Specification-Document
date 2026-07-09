@@ -13,7 +13,7 @@ import EmptyState from "./components/EmptyState";
 import SopForm from "./SopForm";
 import { formatTimestamp } from "./utils/formatters";
 import {
-  getSopExecutions, getSopExecutionAudit, acknowledgeSopStep, cancelSopExecution, startSop,
+  getSopExecutions, getSopExecutionAudit, acknowledgeSopStep, cancelSopExecution, repeatSopStep, startSop,
 } from "./api/sop.api";
 
 const TABS = [
@@ -36,7 +36,7 @@ function targetLabel(item) {
   return (item.zone_ids || []).join(", ") || "—";
 }
 
-function ExecutionCard({ execution, steps, canAck, canRun, onAck, onCancel, busy }) {
+function ExecutionCard({ execution, steps, canAck, canRun, onAck, onCancel, onRepeat, busy }) {
   const [now, setNow] = useState(null);
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
@@ -99,6 +99,10 @@ function ExecutionCard({ execution, steps, canAck, canRun, onAck, onCancel, busy
               <button type="button" onClick={() => onAck(execution.id)} disabled={busy}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-semibold disabled:opacity-50">
                 <CheckCircle2 size={14} aria-hidden="true" /> Acknowledge
+              </button>
+              <button type="button" onClick={() => onRepeat(execution.id)} disabled={busy}
+                className="inline-flex items-center gap-2 px-4 py-2 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-lg text-sm font-semibold disabled:opacity-50">
+                <RotateCcw size={14} aria-hidden="true" /> Repeat
               </button>
             </div>
           )}
@@ -169,10 +173,14 @@ function ExecutionCard({ execution, steps, canAck, canRun, onAck, onCancel, busy
                   )}
 
                   {isCurrent && canAck && isWaiting && (
-                    <div className="pt-2">
+                    <div className="flex gap-3 pt-2">
                       <button type="button" onClick={() => onAck(execution.id)} disabled={busy}
                         className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-semibold disabled:opacity-50">
                         <CheckCircle2 size={14} aria-hidden="true" /> Acknowledge
+                      </button>
+                      <button type="button" onClick={() => onRepeat(execution.id)} disabled={busy}
+                        className="inline-flex items-center gap-2 px-4 py-2 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-lg text-sm font-semibold disabled:opacity-50">
+                        <RotateCcw size={14} aria-hidden="true" /> Repeat
                       </button>
                     </div>
                   )}
@@ -275,6 +283,17 @@ export default function Sop() {
     try {
       const res = await acknowledgeSopStep(executionId);
       if (!res.ok) showToast(res.error || "Failed to acknowledge", "error");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleRepeat = async (executionId) => {
+    setBusyId(executionId);
+    try {
+      const res = await repeatSopStep(executionId);
+      if (res.ok) showToast("Step repeated", "success");
+      else showToast(res.error || "Failed to repeat step", "error");
     } finally {
       setBusyId(null);
     }
@@ -410,7 +429,7 @@ export default function Sop() {
                     key={execution.id} execution={execution}
                     steps={stepsBySopId[execution.sop_id] || null}
                     canAck={canAck} canRun={canRun}
-                    onAck={handleAck} onCancel={handleCancel}
+                    onAck={handleAck} onCancel={handleCancel} onRepeat={handleRepeat}
                     busy={busyId === execution.id}
                   />
                 ))}

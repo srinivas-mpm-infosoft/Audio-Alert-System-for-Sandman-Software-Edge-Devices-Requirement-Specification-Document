@@ -44,10 +44,13 @@ def _play_current_step(execution, sop, SopStepExecution, db, dispatch_broadcast,
         zone_codes,
         message=step.message if not clip_path else None,
         clip_path=clip_path,
-        language=step.language or "EN",
-        alert_category="High",
+        language=step.language,
+        alert_category=step.type_code or "High",
         alert_source=f"SOP: {execution.sop_name} — step {execution.current_step_index + 1}",
         announcement_type="sop",
+        type_code=step.type_code,
+        play_count_override=step.play_count_override,
+        requires_ack_override=step.requires_ack_override,
     )
     for r in receipts:
         db.session.add(SopStepExecution(
@@ -165,6 +168,44 @@ def acknowledge(app, db, SopExecution, SopStepExecution, dispatch_broadcast, all
                 execution.error = str(e)[:500]
                 execution.completed_at = datetime.now()
             db.session.commit()
+
+        out = execution.to_dict()
+        events_bus.publish({"type": "sop_execution", **out})
+        return out, None
+
+
+def repeat_current_step(app, db, SopExecution, SopStepExecution, dispatch_broadcast, all_zone_codes,
+                        execution_id, user, acknowledge_on_edge=None):
+    """Manually re-play the current step's audio right now — the SOP
+    dashboard's "Repeat" button. Same clear-then-replay pattern as the
+    automatic timeout replay, just operator-triggered instead of time-triggered."""
+    with app.app_context():
+        execution = SopExecution.query.filter_by(execution_code=execution_id).first()
+        if not execution:
+            return None, "Execution not found"
+        if execution.status != "WAITING_FOR_ACKNOWLEDGEMENT":
+            return None, f"Execution is not waiting for acknowledgement (status={execution.status})"
+
+        sop = execution.sop
+        step = sop.steps[execution.current_step_index]
+        db.session.add(SopStepExecution(
+            execution_id=execution.id, sop_id=sop.id, step_id=step.id,
+            step_number=execution.current_step_index + 1, event_type="repeated",
+            audio_mode=step.audio_mode, language=step.language,
+            operator=user, retry_count=execution.retry_count,
+        ))
+        if acknowledge_on_edge:
+            _clear_current_receipts(execution, acknowledge_on_edge)
+        db.session.commit()
+
+        try:
+            _play_current_step(execution, sop, SopStepExecution, db, dispatch_broadcast, all_zone_codes)
+            execution.step_started_at = datetime.now()
+            db.session.commit()
+        except Exception as e:
+            log.error("[SOP] repeat_current_step failed: %s", e)
+            db.session.rollback()
+            return None, str(e)
 
         out = execution.to_dict()
         events_bus.publish({"type": "sop_execution", **out})

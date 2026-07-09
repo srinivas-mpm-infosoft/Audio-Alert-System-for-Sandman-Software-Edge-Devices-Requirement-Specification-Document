@@ -42,7 +42,7 @@ export default function AudioAlerts({ subTab = "live", user }) {
 
   useEffect(() => {
     getAudioAlertConfig().then((res) => {
-      if (res.ok) setSystemStatus(res.data);
+      if (res.ok) setSystemStatus(res.data.engine);
       setConfigLoaded(true);
     });
   }, [setSystemStatus]);

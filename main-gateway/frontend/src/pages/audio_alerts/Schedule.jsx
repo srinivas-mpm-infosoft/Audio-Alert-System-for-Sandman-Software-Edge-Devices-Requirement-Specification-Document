@@ -10,6 +10,7 @@ import { formatTimestamp } from "./utils/formatters";
 import { scheduleSummary } from "./utils/scheduleSummary";
 import { getShiftTimes } from "./api/config.api";
 import { getZones } from "./api/devices.api";
+import { getAlertTypes } from "./api/audio.api";
 
 const STATUS_STYLE = {
   success: "text-emerald-700 bg-emerald-50",
@@ -28,6 +29,7 @@ export default function Schedule() {
   const [busyId, setBusyId] = useState(null);
   const [shiftsConfig, setShiftsConfig] = useState(null);
   const [zoneNames, setZoneNames] = useState({});
+  const [alertTypes, setAlertTypes] = useState([]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
@@ -35,11 +37,26 @@ export default function Schedule() {
     getZones().then((r) => {
       if (r.ok) setZoneNames(Object.fromEntries(r.data.map((z) => [z.id, z.name])));
     });
+    getAlertTypes().then((r) => { if (r.ok) setAlertTypes(r.data); });
   }, []);
 
   const targetLabel = (s) => s.plant_wide
     ? "Plant-wide"
     : (s.zone_ids || []).map((id) => zoneNames[id] || id).join(", ") || "—";
+
+  // Explains WHY a schedule might appear to "repeat" — that's the resolved
+  // Alert Type's own repeat/ack behavior replaying on the edge node until
+  // acknowledged, entirely independent of this schedule having fired once.
+  const repeatBehaviorLabel = (s) => {
+    const type = alertTypes.find((t) => t.id === (s.type_code || "normal"));
+    const label = type?.label || "Normal (default)";
+    if (!type) return `${label} — plays once`;
+    const count = s.play_count_override ?? type.initial_play_count;
+    const requiresAck = s.requires_ack_override ?? type.requires_ack;
+    if (!requiresAck && (count ?? 1) <= 1) return `${label} — plays once`;
+    const countLabel = count == null ? "until acknowledged" : `up to ${count}x`;
+    return `${label} — repeats every ${type.repeat_interval_sec}s, ${countLabel}`;
+  };
 
   const handleSave = async (payload) => {
     const res = editTarget ? await update(editTarget.id, payload) : await create(payload);
@@ -129,7 +146,12 @@ export default function Schedule() {
                     <td className="px-4 py-3 text-slate-500 text-xs max-w-[160px]">
                       <span className="truncate block">{targetLabel(s)}</span>
                     </td>
-                    <td className="px-4 py-3 text-slate-600 text-xs max-w-[280px]">{scheduleSummary(s, shiftsConfig)}</td>
+                    <td className="px-4 py-3 text-slate-600 text-xs max-w-[280px]">
+                      <span className="block">{scheduleSummary(s, shiftsConfig)}</span>
+                      <span className="block text-[10px] text-slate-400 mt-0.5" title="Why this might replay — set by the schedule's Alert Type, independent of the schedule's own timing">
+                        {repeatBehaviorLabel(s)}
+                      </span>
+                    </td>
                     <td className="px-4 py-3 text-slate-500 text-xs">
                       {s.next_run_at ? formatTimestamp(s.next_run_at) : "—"}
                     </td>

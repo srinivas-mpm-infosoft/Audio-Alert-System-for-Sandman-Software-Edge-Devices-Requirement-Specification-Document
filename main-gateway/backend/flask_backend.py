@@ -4139,6 +4139,15 @@ def _edge_playback_logs(zone_code: str, limit: int) -> list:
     } for r in rows]
 
 
+@app.route("/audio-alerts/edge/ping", methods=["GET"])
+def aa_edge_ping():
+    """Zone-independent reachability check for an edge node's local
+    dashboard — every other /audio-alerts/edge/* route needs a zone or an
+    alert_id, so none of them can tell the dashboard "gateway is up" when
+    this node has no ZONE_ID configured yet."""
+    return jsonify(ok=True)
+
+
 @app.route("/audio-alerts/edge/playback-logs", methods=["GET"])
 def aa_edge_playback_logs():
     """Recent playback log for this edge node's zone — called by

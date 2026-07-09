@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
-  ArrowLeft, Save, Loader2, Upload, Zap, RotateCw, Users, CalendarDays,
+  ArrowLeft, Save, Loader2, Upload, Zap, RotateCw, Users,
   CalendarRange, CalendarCheck, Power,
 } from "lucide-react";
 import ZonePicker from "./components/ZonePicker";
@@ -26,8 +26,7 @@ const WHEN_OPTIONS = [
   { v: "quick", label: "Soon", sub: "Play in the next few minutes", icon: Zap },
   { v: "hourly", label: "Hourly", sub: "Repeats every hour or few hours", icon: RotateCw },
   { v: "shift", label: "Shift-Based", sub: "Tied to a shift start, end, or break", icon: Users },
-  { v: "daily", label: "Daily", sub: "Same time every day", icon: CalendarDays },
-  { v: "weekly", label: "Weekly", sub: "Specific days of the week", icon: CalendarRange },
+  { v: "weekly", label: "Weekly", sub: "Specific days of the week — pick every day for a daily announcement", icon: CalendarRange },
   { v: "once", label: "One Time", sub: "A specific date and time", icon: CalendarCheck },
 ];
 
@@ -461,6 +460,16 @@ export default function ScheduleForm({ initialSchedule, onSave, onCancel }) {
           <div className="flex flex-wrap items-end gap-6 pt-2 border-t border-slate-100">
             <div>
               <label className={LABEL}>Which days?</label>
+              <div className="flex flex-wrap gap-1.5 mb-2">
+                <button type="button" onClick={() => set("days_of_week", [0, 1, 2, 3, 4, 5, 6])}
+                  className="px-3 py-1.5 rounded-full text-xs font-semibold border-2 border-slate-200 text-slate-500 hover:border-indigo-300">
+                  Every day
+                </button>
+                <button type="button" onClick={() => set("days_of_week", [0, 1, 2, 3, 4])}
+                  className="px-3 py-1.5 rounded-full text-xs font-semibold border-2 border-slate-200 text-slate-500 hover:border-indigo-300">
+                  Working days only (Mon–Fri)
+                </button>
+              </div>
               <div className="flex flex-wrap gap-1.5">
                 {DAYS.map((d) => {
                   const active = form.days_of_week.includes(d.v);

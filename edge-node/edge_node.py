@@ -803,6 +803,14 @@ def _gateway(method: str, path: str, timeout=5, **kwargs) -> dict:
         return {"ok": False, "error": f"Gateway unreachable: {e}"}
 
 
+@app.route('/dashboard/ping', methods=['GET'])
+def dashboard_ping():
+    """Zone-independent gateway reachability check — used by the dashboard's
+    gwStatus pill so an unconfigured ZONE_ID doesn't make the gateway look
+    unreachable (it only means the SOP card can't be shown)."""
+    return jsonify(_gateway('GET', '/audio-alerts/edge/ping'))
+
+
 @app.route('/dashboard/alert-info', methods=['GET'])
 def dashboard_alert_info():
     alert_id = request.args.get('alert_id', type=int)
@@ -894,6 +902,11 @@ _DASHBOARD_HTML = """<!doctype html>
   </div>
 
   <div class="card">
+    <h2>Alert Queue — everything on this node right now</h2>
+    <div id="queueList" style="font-size:13px;color:#94a3b8">Loading…</div>
+  </div>
+
+  <div class="card">
     <h2>Live Voice Paging</h2>
     <div class="row"><span class="k">Status</span><span id="pagingStatus" class="pill idle">idle</span></div>
   </div>
@@ -978,22 +991,31 @@ async function fetchJSON(url, opts) {
   }
 }
 
-async function refreshSop() {
+async function refreshGatewayStatus() {
   const gwEl = document.getElementById('gwStatus');
-  const sopCard = document.getElementById('sopCard');
-  if (!ZONE_ID) {
-    gwEl.textContent = 'no zone configured';
-    gwEl.className = 'pill warn';
-    return;
-  }
-  const res = await fetchJSON('/dashboard/sop-status');
+  const res = await fetchJSON('/dashboard/ping');
   if (!res.ok) {
     gwEl.textContent = 'unreachable';
     gwEl.className = 'pill bad';
     return;
   }
+  if (!ZONE_ID) {
+    gwEl.textContent = 'connected — no zone configured';
+    gwEl.className = 'pill warn';
+    return;
+  }
   gwEl.textContent = 'connected';
   gwEl.className = 'pill ok';
+}
+
+async function refreshSop() {
+  const sopCard = document.getElementById('sopCard');
+  if (!ZONE_ID) {
+    sopCard.style.display = 'none';
+    return;
+  }
+  const res = await fetchJSON('/dashboard/sop-status');
+  if (!res.ok) return;
 
   if (!res.data) {
     sopCard.style.display = 'none';
@@ -1087,6 +1109,42 @@ async function doAckAll() {
 }
 document.getElementById('ackAllBtn').onclick = doAckAll;
 
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function refreshQueue() {
+  const el = document.getElementById('queueList');
+  const res = await fetchJSON('/queue');
+  const items = res.items || [];
+  if (items.length === 0) { el.textContent = 'Queue is empty — nothing playing or waiting.'; return; }
+  el.innerHTML = items.map((it) => {
+    const maxPlays = (it.max_plays == null) ? '∞' : it.max_plays;
+    const badges = [
+      it.is_blocking ? '<span class="pill bad">blocking</span>' : '',
+      it.requires_ack ? '<span class="pill warn">needs ack</span>' : '<span class="pill idle">auto-ack</span>',
+      it.acknowledged ? '<span class="pill ok">acknowledged</span>' : '',
+    ].filter(Boolean).join(' ');
+    return '<div class="row" style="border-bottom:1px solid #1e293b;padding:8px 0;align-items:flex-start">' +
+      '<span>' +
+        '<strong>#' + it.alert_id + '</strong> — ' + escapeHtml(it.alert_category || 'alert') +
+        ' <span style="color:#64748b">(' + it.play_count + '/' + maxPlays + ' plays)</span><br>' +
+        badges +
+      '</span>' +
+      (it.acknowledged ? '' : '<button data-ack-id="' + it.alert_id + '" class="btn-secondary">Acknowledge</button>') +
+    '</div>';
+  }).join('');
+}
+document.getElementById('queueList').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-ack-id]');
+  if (!btn) return;
+  btn.disabled = true;
+  fetchJSON('/acknowledge', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ alert_id: +btn.dataset.ackId }),
+  }).then(() => { refreshQueue(); refreshHealth(); });
+});
+
 function fmtLogTime(iso) {
   if (!iso) return '—';
   try { return new Date(iso).toLocaleString(); } catch (e) { return iso; }
@@ -1107,10 +1165,12 @@ async function refreshLogs() {
   )).join('');
 }
 
-refreshHealth(); refreshSop(); refreshLogs();
+refreshHealth(); refreshGatewayStatus(); refreshSop(); refreshLogs(); refreshQueue();
 setInterval(refreshHealth, 3000);
+setInterval(refreshGatewayStatus, 5000);
 setInterval(refreshSop, 3000);
 setInterval(refreshLogs, 15000);
+setInterval(refreshQueue, 3000);
 </script>
 </body>
 </html>
@@ -1137,3 +1197,5 @@ if __name__=='__main__':
              f"High: replay every {HIGH_REPEAT_SEC}s, Normal/Low: play once")
     log.info("="*55)
     app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
+
+#V1

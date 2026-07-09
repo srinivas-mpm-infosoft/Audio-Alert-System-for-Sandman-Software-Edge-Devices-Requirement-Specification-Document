@@ -40,6 +40,10 @@ const IO_PANEL_IDS = new Set(IO_SUB_ITEMS.map((i) => i.id));
 // Grouped for foundry-floor usability: what's happening now, how to send an
 // alert, how to plan one ahead, rarely-touched setup, then after-the-fact review.
 const AA_SUB_ITEMS = [
+  { id: "aa-devices",    icon: Cpu,           label: "Devices & Zones",  perm: "aa.devices.view",     group: "Setup" },
+  { id: "aa-alerttypes", icon: Sliders,       label: "Alert Types",      perm: "aa.alerttypes.view",  group: "Setup" },
+  { id: "aa-audio",      icon: Volume2,       label: "Audio Config",     perm: "aa.audio.upload",     group: "Setup" },
+  { id: "aa-settings",   icon: Settings2,     label: "App Settings",     perm: "aa.users.manage",     group: "Setup" },
   { id: "aa-live",       icon: Activity,      label: "Live Monitor",     perm: "aa.live.view",        group: "Monitor" },
   { id: "aa-broadcast",  icon: Megaphone,     label: "Manual Broadcast", perm: "aa.broadcast.manual", group: "Send Alert" },
   { id: "aa-paging",     icon: Mic,           label: "Live Paging",      perm: "aa.paging.use",       group: "Send Alert" },
@@ -47,10 +51,6 @@ const AA_SUB_ITEMS = [
   // Rule Builder hidden from navigation for now — kept here (commented) for easy re-enable.
   // { id: "aa-rules",     icon: Sliders,   label: "Rule Builder",    perm: "aa.rules.view", group: "Send Alert" },
   { id: "aa-schedule",   icon: CalendarClock, label: "Schedule",         perm: "aa.schedule.view",    group: "Plan Ahead" },
-  { id: "aa-devices",    icon: Cpu,           label: "Devices & Zones",  perm: "aa.devices.view",     group: "Setup" },
-  { id: "aa-audio",      icon: Volume2,       label: "Audio Config",     perm: "aa.audio.upload",     group: "Setup" },
-  { id: "aa-alerttypes", icon: Sliders,       label: "Alert Types",      perm: "aa.alerttypes.view",  group: "Setup" },
-  { id: "aa-settings",   icon: Settings2,     label: "App Settings",     perm: "aa.users.manage",     group: "Setup" },
   { id: "aa-analytics",  icon: BarChart3,     label: "Analytics",        perm: "aa.analytics.view",   group: "Reports" },
   { id: "aa-logs",       icon: FileText,      label: "Logs",             perm: "aa.logs.view",        group: "Reports" },
 ];
@@ -120,18 +120,18 @@ export default function Sidebar({ active, onSelect, role }) {
               <li key={item.id}>
                 <button
                   onClick={() => setIoOpen((o) => !o)}
-                  className="w-full flex items-center justify-between px-3 py-2 rounded-md text-sm transition-colors duration-100"
-                  style={isIOActive ? { background: "#1e3a5f22", color: "#4171a8", borderLeft: "2px solid #3b82f6" } : { color: "#6b7280" }}
-                  onMouseEnter={(e) => { if (!isIOActive) e.currentTarget.style.color = "#d1d5db"; }}
-                  onMouseLeave={(e) => { if (!isIOActive) e.currentTarget.style.color = "#6b7280"; }}
+                  className="w-full flex items-center justify-between px-3 py-2 rounded-md text-sm font-semibold transition-colors duration-100"
+                  style={isIOActive ? { background: "#1e3a5f22", color: "#7dd3fc", borderLeft: "2px solid #3b82f6" } : { color: "#e2e8f0" }}
+                  onMouseEnter={(e) => { if (!isIOActive) e.currentTarget.style.color = "#f8fafc"; }}
+                  onMouseLeave={(e) => { if (!isIOActive) e.currentTarget.style.color = "#e2e8f0"; }}
                 >
                   <div className="flex items-center gap-2.5">
-                    <Icon size={15} style={{ color: isIOActive ? "#60a5fa" : "#4b5563" }} />
-                    <span className="font-medium">{item.label}</span>
+                    <Icon size={15} style={{ color: isIOActive ? "#60a5fa" : "#94a3b8" }} />
+                    <span className="font-semibold">{item.label}</span>
                   </div>
                   <ChevronDown
                     size={13}
-                    style={{ color: "#4b5563", transform: ioOpen ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 0.2s" }}
+                    style={{ color: "#94a3b8", transform: ioOpen ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 0.2s" }}
                   />
                 </button>
 
@@ -144,12 +144,12 @@ export default function Sidebar({ active, onSelect, role }) {
                         <button
                           key={sub.id}
                           onClick={() => onSelect(sub.id)}
-                          className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded text-[12.5px] font-medium transition-colors duration-100"
-                          style={isActive ? { background: "#1e3a5f33", color: "#93c5fd" } : { color: "#4b5563" }}
-                          onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.color = "#9ca3af"; }}
-                          onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.color = "#4b5563"; }}
+                          className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded text-[12.5px] font-semibold transition-colors duration-100"
+                          style={isActive ? { background: "#1e3a5f33", color: "#93c5fd" } : { color: "#cbd5e1" }}
+                          onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.color = "#f1f5f9"; }}
+                          onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.color = "#cbd5e1"; }}
                         >
-                          <SubIcon size={12} style={{ color: isActive ? "#60a5fa" : "#374151" }} />
+                          <SubIcon size={12} style={{ color: isActive ? "#60a5fa" : "#94a3b8" }} />
                           {sub.label}
                           {isActive && <span className="ml-auto rounded-full flex-shrink-0" style={{ width: 5, height: 5, background: "#3b82f6" }} />}
                         </button>
@@ -167,19 +167,19 @@ export default function Sidebar({ active, onSelect, role }) {
               <li key={item.id}>
                 <button
                   onClick={() => setAaOpen((o) => !o)}
-                  className="w-full flex items-center justify-between px-3 py-2 rounded-md text-sm transition-colors duration-100"
-                  style={isAAActive ? { background: "#1e3a5f22", color: "#93c5fd", borderLeft: "2px solid #3b82f6" } : { color: "#6b7280" }}
-                  onMouseEnter={(e) => { if (!isAAActive) e.currentTarget.style.color = "#d1d5db"; }}
-                  onMouseLeave={(e) => { if (!isAAActive) e.currentTarget.style.color = "#6b7280"; }}
+                  className="w-full flex items-center justify-between px-3 py-2 rounded-md text-sm font-semibold transition-colors duration-100"
+                  style={isAAActive ? { background: "#1e3a5f22", color: "#93c5fd", borderLeft: "2px solid #3b82f6" } : { color: "#e2e8f0" }}
+                  onMouseEnter={(e) => { if (!isAAActive) e.currentTarget.style.color = "#f8fafc"; }}
+                  onMouseLeave={(e) => { if (!isAAActive) e.currentTarget.style.color = "#e2e8f0"; }}
                   aria-expanded={aaOpen}
                 >
                   <div className="flex items-center gap-2.5">
-                    <Volume2 size={15} style={{ color: isAAActive ? "#60a5fa" : "#4b5563" }} aria-hidden="true" />
-                    <span className="font-medium">{item.label}</span>
+                    <Volume2 size={15} style={{ color: isAAActive ? "#60a5fa" : "#94a3b8" }} aria-hidden="true" />
+                    <span className="font-semibold">{item.label}</span>
                   </div>
                   <ChevronDown
                     size={13}
-                    style={{ color: "#4b5563", transform: aaOpen ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 0.2s" }}
+                    style={{ color: "#94a3b8", transform: aaOpen ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 0.2s" }}
                     aria-hidden="true"
                   />
                 </button>
@@ -196,18 +196,18 @@ export default function Sidebar({ active, onSelect, role }) {
                         return (
                           <React.Fragment key={sub.id}>
                             {showHeader && (
-                              <div className="pt-2 pb-0.5 px-2.5 text-[9.5px] font-bold uppercase tracking-widest" style={{ color: "#4b5563" }}>
+                              <div className="pt-2 pb-0.5 px-2.5 text-[9.5px] font-bold uppercase tracking-widest" style={{ color: "#7dd3fc" }}>
                                 {sub.group}
                               </div>
                             )}
                             <button
                               onClick={() => onSelect(sub.id)}
-                              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded text-[12.5px] font-medium transition-colors duration-100"
-                              style={isActive ? { background: "#1e3a5f33", color: "#93c5fd" } : { color: "#4b5563" }}
-                              onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.color = "#9ca3af"; }}
-                              onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.color = "#4b5563"; }}
+                              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded text-[12.5px] font-semibold transition-colors duration-100"
+                              style={isActive ? { background: "#1e3a5f33", color: "#93c5fd" } : { color: "#cbd5e1" }}
+                              onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.color = "#f1f5f9"; }}
+                              onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.color = "#cbd5e1"; }}
                             >
-                              <SubIcon size={12} style={{ color: isActive ? "#60a5fa" : "#374151" }} aria-hidden="true" />
+                              <SubIcon size={12} style={{ color: isActive ? "#60a5fa" : "#94a3b8" }} aria-hidden="true" />
                               {sub.label}
                               {isActive && <span className="ml-auto rounded-full shrink-0" style={{ width: 5, height: 5, background: "#3b82f6" }} aria-hidden="true" />}
                             </button>
@@ -227,12 +227,12 @@ export default function Sidebar({ active, onSelect, role }) {
             <li key={item.id} id={item.domId}>
               <button
                 onClick={() => onSelect(item.id)}
-                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-sm font-medium transition-colors duration-100"
-                style={isActive ? { background: "#1e3a5f22", color: "#93c5fd", borderLeft: "2px solid #3b82f6" } : { color: "#6b7280" }}
-                onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.color = "#d1d5db"; }}
-                onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.color = "#6b7280"; }}
+                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-sm font-semibold transition-colors duration-100"
+                style={isActive ? { background: "#1e3a5f22", color: "#93c5fd", borderLeft: "2px solid #3b82f6" } : { color: "#e2e8f0" }}
+                onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.color = "#f8fafc"; }}
+                onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.color = "#e2e8f0"; }}
               >
-                <Icon size={15} style={{ color: isActive ? "#60a5fa" : "#4b5563" }} />
+                <Icon size={15} style={{ color: isActive ? "#60a5fa" : "#94a3b8" }} />
                 {item.label}
                 {isActive && <span className="ml-auto rounded-full" style={{ width: 5, height: 5, background: "#3b82f6", flexShrink: 0 }} />}
               </button>

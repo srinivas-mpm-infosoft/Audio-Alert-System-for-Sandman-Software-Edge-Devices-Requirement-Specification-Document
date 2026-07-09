@@ -4,7 +4,7 @@ import { useAppConfigStore } from "../../../store/useAppConfigStore";
 export default function LanguagePicker({ value, onChange, label = "Language", includeZoneDefault = false, disabled = false }) {
   const LANGUAGES = useAppConfigStore((s) => s.languages);
   const options = includeZoneDefault
-    ? [{ code: null, label: "Use zone default", flag: "🔁" }, ...LANGUAGES]
+    ? [{ code: null, label: "Auto — each zone's own language", flag: "🔁" }, ...LANGUAGES]
     : LANGUAGES;
 
   return (
@@ -22,6 +22,11 @@ export default function LanguagePicker({ value, onChange, label = "Language", in
           </option>
         ))}
       </select>
+      {includeZoneDefault && !value && (
+        <p className="text-[10px] text-slate-400 mt-1">
+          Each targeted zone plays this message translated into its own configured language — set per zone under Audio Config → Zones &amp; Languages. Pick a language above only to force every zone to that one language instead.
+        </p>
+      )}
     </div>
   );
 }

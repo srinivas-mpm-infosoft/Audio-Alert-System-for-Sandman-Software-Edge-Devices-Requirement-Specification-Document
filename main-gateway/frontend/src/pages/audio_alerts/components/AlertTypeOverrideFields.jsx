@@ -14,31 +14,38 @@ const ACK_OPTIONS = [
 // value: { type_code, play_count_override, requires_ack_override }
 export default function AlertTypeOverrideFields({ value, onChange, typeLabel = "Alert Type", defaultTypeLabel = "Default" }) {
   const set = (k, v) => onChange({ ...value, [k]: v });
+  const hasOverride = value.type_code != null || value.play_count_override != null || value.requires_ack_override != null;
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-      <AlertTypePicker value={value.type_code} onChange={(v) => set("type_code", v)} label={typeLabel} placeholderLabel={defaultTypeLabel} />
+    <details open={hasOverride} className="group">
+      <summary className="text-xs font-semibold text-indigo-600 cursor-pointer select-none list-none marker:content-none inline-flex items-center gap-1">
+        <span className="inline-block transition-transform group-open:rotate-90">▸</span>
+        Advanced: alert type, play count, acknowledgement
+      </summary>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-3">
+        <AlertTypePicker value={value.type_code} onChange={(v) => set("type_code", v)} label={typeLabel} placeholderLabel={defaultTypeLabel} />
 
-      <div>
-        <label className={LABEL}>Play Count Override</label>
-        <input
-          type="number" min={1} className={INPUT}
-          value={value.play_count_override ?? ""}
-          placeholder="Use alert type's setting"
-          onChange={(e) => set("play_count_override", e.target.value === "" ? null : Math.max(1, +e.target.value || 1))}
-        />
-      </div>
+        <div>
+          <label className={LABEL}>Play Count Override</label>
+          <input
+            type="number" min={1} className={INPUT}
+            value={value.play_count_override ?? ""}
+            placeholder="Use alert type's setting"
+            onChange={(e) => set("play_count_override", e.target.value === "" ? null : Math.max(1, +e.target.value || 1))}
+          />
+        </div>
 
-      <div>
-        <label className={LABEL}>Acknowledgement</label>
-        <select
-          className={INPUT}
-          value={value.requires_ack_override === null || value.requires_ack_override === undefined ? "" : String(value.requires_ack_override)}
-          onChange={(e) => set("requires_ack_override", e.target.value === "" ? null : e.target.value === "true")}
-        >
-          {ACK_OPTIONS.map((o) => <option key={o.v} value={o.v}>{o.l}</option>)}
-        </select>
+        <div>
+          <label className={LABEL}>Acknowledgement</label>
+          <select
+            className={INPUT}
+            value={value.requires_ack_override === null || value.requires_ack_override === undefined ? "" : String(value.requires_ack_override)}
+            onChange={(e) => set("requires_ack_override", e.target.value === "" ? null : e.target.value === "true")}
+          >
+            {ACK_OPTIONS.map((o) => <option key={o.v} value={o.v}>{o.l}</option>)}
+          </select>
+        </div>
       </div>
-    </div>
+    </details>
   );
 }

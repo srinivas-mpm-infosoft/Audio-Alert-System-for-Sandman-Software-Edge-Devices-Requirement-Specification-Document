@@ -15,6 +15,13 @@ export async function acknowledgeAlert(alert_id, note = "") {
   return res.json();
 }
 
+export async function acknowledgeBroadcastAlert(alert_id) {
+  const res = await fetch(`${targetUrl}/audio-alerts/broadcast/${alert_id}/ack`, {
+    method: "POST", credentials: "include",
+  });
+  return res.json();
+}
+
 export async function broadcastManual(payload) {
   const res = await fetch(`${targetUrl}/audio-alerts/broadcast`, {
     method: "POST", credentials: "include",

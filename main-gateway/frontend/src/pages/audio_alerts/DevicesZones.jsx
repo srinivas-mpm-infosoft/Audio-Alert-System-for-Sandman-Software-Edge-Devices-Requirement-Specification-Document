@@ -16,6 +16,7 @@ import { useAppConfigStore } from "../../store/useAppConfigStore";
 import StatusPill from "./components/StatusPill";
 import ConfirmDialog from "./components/ConfirmDialog";
 import EmptyState from "./components/EmptyState";
+import RefreshButton from "./components/RefreshButton";
 import { DEVICE_TYPES } from "./utils/constants";
 import { timeAgo, formatDuration } from "./utils/formatters";
 import { targetUrl as BASE_URL } from "../../config";
@@ -78,7 +79,7 @@ function LanguageSettings({ plants, zones, languages, showToast, canEdit }) {
   const [loading, setLoading]       = useState(true);
   const [saving, setSaving]         = useState(false);
 
-  useEffect(() => {
+  const loadConfig = useCallback(() => {
     setLoading(true);
     apiFetch("GET", `${BASE_URL}/audio-alerts/zone-language-config`)
       .then((res) => {
@@ -89,6 +90,8 @@ function LanguageSettings({ plants, zones, languages, showToast, canEdit }) {
       })
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => { loadConfig(); }, [loadConfig]);
 
   const setLang = (type, refId, lang) =>
     setConfigs((c) => ({ ...c, [type]: { ...c[type], [refId]: lang } }));
@@ -120,6 +123,9 @@ function LanguageSettings({ plants, zones, languages, showToast, canEdit }) {
 
   return (
     <div className="flex flex-col gap-5">
+      <div className="flex justify-end">
+        <RefreshButton onClick={loadConfig} loading={loading} title="Refresh language settings" />
+      </div>
       {/* Type selector */}
       <div>
         <p className={LABEL + " mb-2"}>Language Assignment Mode</p>

@@ -16,11 +16,26 @@ import logging
 import threading
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 log = logging.getLogger("configuration_ui")
 
 _CHECK_INTERVAL_SEC = 20
 _started = False
+
+
+def _clip_abs_path(file_path):
+    # AudioClip.file_path is just a filename, resolved against uploads/clips
+    # at read time (not shared code with flask_backend.py's identical
+    # helper — kept in sync manually, same as other sibling-file duplication
+    # in this codebase). Absolute legacy paths from before this fix still
+    # work as-is, no migration needed.
+    if not file_path:
+        return None
+    p = Path(file_path)
+    if p.is_absolute():
+        return p
+    return Path(__file__).parent / "uploads" / "clips" / file_path
 
 
 def _hm_to_min(hhmm):
@@ -146,7 +161,7 @@ def _run_due(app, db, ScheduledAnnouncement, dispatch_broadcast, all_zone_codes,
                     log.warning("[Scheduler] '%s' has no target zones — skipping", sched.name)
                     status = "failed"
                 else:
-                    clip_path = sched.clip.file_path if (sched.clip_id and sched.clip) else None
+                    clip_path = str(_clip_abs_path(sched.clip.file_path)) if (sched.clip_id and sched.clip) else None
                     receipts = dispatch_broadcast(
                         zone_codes,
                         message=sched.message if not clip_path else None,

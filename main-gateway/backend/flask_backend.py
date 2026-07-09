@@ -1134,6 +1134,7 @@ class SopExecution(db.Model):
             "ack_timeout_sec":     self.sop.ack_timeout_sec if self.sop else None,
             "completed_at":        self.completed_at.isoformat() if self.completed_at else None,
             "error":               self.error,
+            "current_receipts":    self.current_receipts or [],
         }
 
 
@@ -2389,6 +2390,33 @@ def aa_ack():
     return jsonify(ok=True, data=event.to_dict())
 
 
+@app.route("/audio-alerts/broadcast/<int:alert_id>/ack", methods=["POST"])
+def aa_broadcast_ack(alert_id):
+    """Acknowledge a Manual Broadcast / Scheduled Announcement alert from
+    Live Monitor — these have no AlertEvent row (they only write to
+    alert_logs), so unlike aa_ack() above there's no status to flip; the
+    only real state is the edge node's own queue, which acknowledge_on_edge
+    already knows how to clear (same helper sop_service already uses)."""
+    err = _require_login()
+    if err: return err
+    if not _can("aa.alerts.ack"):
+        return jsonify(ok=False, error="Permission denied"), 403
+    row = db.session.execute(text(
+        "SELECT device_ip FROM alert_logs WHERE alert_id = :aid ORDER BY alert_timestamp DESC LIMIT 1"
+    ), {"aid": alert_id}).mappings().first()
+    if not row or not row["device_ip"]:
+        return jsonify(ok=False, error="Alert not found"), 404
+    if not dispatch_service.acknowledge_on_edge(row["device_ip"], alert_id):
+        return jsonify(ok=False, error="Could not reach the edge node"), 502
+    db.session.execute(text(
+        "UPDATE alert_logs SET ack_time = :now WHERE alert_id = :aid"
+    ), {"now": datetime.now(), "aid": alert_id})
+    db.session.commit()
+    _add_audit("ack", f"alert/{alert_id}", f"Broadcast alert #{alert_id}",
+              after={"ack_user": _current_user().get("username", "unknown")})
+    return jsonify(ok=True, data={"alert_id": alert_id})
+
+
 @app.route("/audio-alerts/broadcast", methods=["POST"])
 def aa_broadcast():
     err = _require_login()
@@ -2411,7 +2439,7 @@ def aa_broadcast():
         clip = AudioClip.query.filter_by(clip_code=clip_id).first()
         if not clip or not clip.file_path:
             return jsonify(ok=False, error="Clip not found or has no audio file"), 404
-        clip_path = clip.file_path
+        clip_path = str(_clip_abs_path(clip.file_path))
 
     play_count_override = data.get("play_count_override")
     if play_count_override not in (None, ""):
@@ -3640,6 +3668,26 @@ def _detect_shift() -> str:
 # AUDIO ALERTS — Audio Clips & TTS Templates
 # ============================================================
 
+def _clip_upload_dir() -> Path:
+    d = Path(__file__).parent / "uploads" / "clips"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _clip_abs_path(file_path):
+    """AudioClip.file_path is stored as just a filename (resolved against
+    the current uploads/clips dir at read time, so it survives the backend
+    checkout moving/renaming) — except older rows created before this fix,
+    which still hold a full absolute path baked in at upload time; keep
+    those working as long as that path still exists, with no migration."""
+    if not file_path:
+        return None
+    p = Path(file_path)
+    if p.is_absolute():
+        return p
+    return _clip_upload_dir() / file_path
+
+
 @app.route("/audio-alerts/audio/clips", methods=["GET"])
 def aa_clips_get():
     err = _require_login()
@@ -3673,12 +3721,9 @@ def aa_clips_post():
                 data["file_size"] = existing.file_size
                 data["duration_sec"] = data.get("duration_sec") or existing.duration_sec
             else:
-                upload_dir = Path(__file__).parent / "uploads" / "clips"
-                upload_dir.mkdir(parents=True, exist_ok=True)
                 filename = f"{uuid.uuid4().hex[:8]}_{f.filename}"
-                filepath = upload_dir / filename
-                filepath.write_bytes(content)
-                data["file_path"] = str(filepath.resolve())
+                (_clip_upload_dir() / filename).write_bytes(content)
+                data["file_path"] = filename
                 data["format"]    = os.path.splitext(f.filename)[1].lstrip(".").upper()
                 data["file_size"] = len(content)
     else:
@@ -3733,12 +3778,9 @@ def aa_clips_put(clip_id):
         data = {k: v for k, v in request.form.items()}
         f = request.files.get("file")
         if f:
-            upload_dir = Path(__file__).parent / "uploads" / "clips"
-            upload_dir.mkdir(parents=True, exist_ok=True)
             filename = f"{uuid.uuid4().hex[:8]}_{f.filename}"
-            filepath = upload_dir / filename
-            f.save(str(filepath))
-            data["file_path"] = str(filepath.resolve())
+            f.save(str(_clip_upload_dir() / filename))
+            data["file_path"] = filename
             data["format"]    = os.path.splitext(f.filename)[1].lstrip(".").upper()
     else:
         data = request.json or {}
@@ -3814,7 +3856,7 @@ def aa_clip_file(clip_id):
     clip = AudioClip.query.filter_by(clip_code=clip_id).first()
     if not clip or not clip.file_path:
         return jsonify(ok=False, error="Clip not found"), 404
-    p = Path(clip.file_path)
+    p = _clip_abs_path(clip.file_path)
     if not p.exists():
         return jsonify(ok=False, error="Audio file missing on disk"), 404
     mimetype = "audio/wav" if (clip.format or "").upper() == "WAV" else "audio/mpeg"

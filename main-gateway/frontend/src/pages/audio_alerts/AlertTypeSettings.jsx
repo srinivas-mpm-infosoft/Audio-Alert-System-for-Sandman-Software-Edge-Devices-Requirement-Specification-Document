@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import { Plus, Pencil, Trash2, Loader2, ShieldAlert, Repeat, Lock } from "lucide-react";
 import { getAlertTypes, createAlertType, updateAlertType, deleteAlertType } from "./api/audio.api";
 import { useCan } from "./hooks/useCan";
 import { useToast } from "../../components/ToastContext";
 import ConfirmDialog from "./components/ConfirmDialog";
 import EmptyState from "./components/EmptyState";
+import RefreshButton from "./components/RefreshButton";
 
 const INPUT = "w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 focus:border-zinc-400 text-slate-700";
 const LABEL = "text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block";
@@ -27,12 +28,15 @@ export default function AlertTypeSettings() {
   const canManage = useCan("aa.alerttypes.manage");
   const showToast = useToast();
 
-  useEffect(() => {
+  const loadTypes = useCallback(() => {
+    setLoading(true);
     getAlertTypes().then((res) => {
       if (res.ok) setTypes(res.data);
       setLoading(false);
     });
   }, []);
+
+  useEffect(() => { loadTypes(); }, [loadTypes]);
 
   const openNew = () => { setEditing(null); setForm(BLANK_FORM); setFormOpen(true); };
   const openEdit = (t) => {
@@ -88,12 +92,15 @@ export default function AlertTypeSettings() {
             Manual Broadcast, SOP, and Scheduled alerts pick one of these types when sent.
           </p>
         </div>
+        <div className="flex items-center gap-2 shrink-0">
+        <RefreshButton onClick={loadTypes} loading={loading} title="Refresh alert types" />
         {canManage && (
           <button type="button" onClick={openNew}
             className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-semibold whitespace-nowrap">
             <Plus size={14} /> New Alert Type
           </button>
         )}
+        </div>
       </div>
 
       {loading ? (

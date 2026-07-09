@@ -40,6 +40,7 @@ ENDPOINTS:
 import json
 import logging
 import os
+import queue
 import re
 import subprocess
 import tempfile
@@ -184,11 +185,16 @@ def _sys_info() -> dict:
     }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Live voice paging (D4) — chunked near-live streaming, one session at a time
+# Live voice paging (D4) — raw 16kHz mono PCM streaming, one session at a time
 # ══════════════════════════════════════════════════════════════════════════════
 
 _paging_active = [False]
 _paging_lock   = Lock()
+
+PAGING_RATE          = 16000
+PAGING_CHUNK_SAMPLES = 320       # 20ms at 16kHz
+PAGING_CHUNK_BYTES   = 640       # 320 samples * 2 bytes (S16_LE)
+PAGING_QUEUE_MAX     = 3         # live voice — drop old audio rather than build latency
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MQTT heartbeat publisher (technology requirement — additive to GET /health;
@@ -694,13 +700,16 @@ def health():
 # Live voice paging — WebSocket ingest (D4)
 # ══════════════════════════════════════════════════════════════════════════════
 
-@sock.route('/paging/ws')
-def paging_ws(ws):
+def _paging_session(ws):
     """
-    Receives chunked audio (binary frames, whatever container/codec the
-    browser's MediaRecorder produced — typically WebM/Opus) forwarded by
-    flask_backend.py's paging relay, and pipes it live into ffmpeg for
-    near-real-time playback on this node's audio device.
+    Receives raw 16kHz mono S16_LE PCM (320-sample / 640-byte / 20ms binary
+    frames — the browser resamples+encodes this itself, no container/codec
+    involved) forwarded by flask_backend.py's paging relay, and feeds it to
+    aplay for near-real-time playback on this node's audio device. A bounded
+    queue (PAGING_QUEUE_MAX) sits between the WebSocket receive loop and the
+    playback thread — for live voice, old audio is worthless, so a slow
+    speaker/network drops the oldest queued chunk rather than accumulating
+    latency.
 
     Only one paging session per node at a time — normal queued alert
     playback is held (see _worker's paging_active check) for the duration.
@@ -749,14 +758,33 @@ def paging_ws(ws):
         break
 
     device = _get_audio_device()
-    cmd = ['ffmpeg', '-loglevel', 'error', '-i', 'pipe:0', '-f', 'alsa',
-          device if device else 'default']
-    log.info(f"[Paging] Session start — device={device or 'default'}")
+    cmd = ['aplay', '-D', device if device else 'default',
+          '-f', 'S16_LE', '-r', str(PAGING_RATE), '-c', '1',
+          '--buffer-size=960', '--period-size=320', '-q']
+    log.info(f"[Paging] Session start — device={device or 'default'} "
+             f"rate={PAGING_RATE} chunk={PAGING_CHUNK_SAMPLES} queue={PAGING_QUEUE_MAX}")
 
     proc = None
+    playback_thread = None
+    audio_queue = queue.Queue(maxsize=PAGING_QUEUE_MAX)
+
+    def playback_loop():
+        while True:
+            chunk = audio_queue.get()
+            if chunk is None:
+                break
+            try:
+                proc.stdin.write(chunk)
+            except (BrokenPipeError, OSError):
+                break
+
     try:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                bufsize=0)
+        playback_thread = threading.Thread(target=playback_loop, daemon=True)
+        playback_thread.start()
+
         while True:
             try:
                 data = ws.receive(timeout=30)
@@ -765,16 +793,34 @@ def paging_ws(ws):
             if data is None:
                 break
             if isinstance(data, (bytes, bytearray)):
+                if len(data) != PAGING_CHUNK_BYTES:
+                    log.warning(f"[Paging] Invalid PCM chunk: {len(data)} bytes, "
+                                f"expected {PAGING_CHUNK_BYTES}")
+                    continue
                 try:
-                    proc.stdin.write(data)
-                    proc.stdin.flush()
-                except (BrokenPipeError, OSError):
-                    log.warning("[Paging] ffmpeg pipe closed unexpectedly")
-                    break
+                    audio_queue.put_nowait(bytes(data))
+                except queue.Full:
+                    # Drop the oldest audio instead of building latency.
+                    try: audio_queue.get_nowait()
+                    except queue.Empty: pass
+                    try: audio_queue.put_nowait(bytes(data))
+                    except queue.Full: pass
             # Ignore text control frames (e.g. a client-side keepalive ping)
     except Exception as e:
         log.error(f"[Paging] Session error: {e}")
     finally:
+        # Non-blocking sentinel — if the queue happens to be full and the
+        # playback thread has already died (broken pipe), a blocking put()
+        # here would hang this whole handler forever.
+        try:
+            audio_queue.put_nowait(None)
+        except queue.Full:
+            try: audio_queue.get_nowait()
+            except queue.Empty: pass
+            try: audio_queue.put_nowait(None)
+            except queue.Full: pass
+        if playback_thread is not None:
+            playback_thread.join(timeout=2)
         if proc is not None:
             try:
                 proc.stdin.close()
@@ -787,6 +833,14 @@ def paging_ws(ws):
         with _paging_lock:
             _paging_active[0] = False
         log.info("[Paging] Session ended")
+
+
+# sock.route()'s decorator doesn't return the wrapped function (it registers
+# websocket_route with Flask instead), so decorating _paging_session directly
+# with @sock.route(...) would clobber this module's name for it with None —
+# apply the registration this way instead so _paging_session stays a plain,
+# directly-callable/testable function.
+sock.route('/paging/ws')(_paging_session)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1008,10 +1062,17 @@ async function refreshGatewayStatus() {
   gwEl.className = 'pill ok';
 }
 
+// alert_id -> SOP execution id, for whatever SOP step audio is currently
+// queued on this node — lets the Alert Queue card redirect its per-item
+// Acknowledge to the proper SOP-ack flow instead of the edge-local-only one,
+// so clicking either button while a SOP step is active does the right thing.
+let currentSopAlertIds = {};
+
 async function refreshSop() {
   const sopCard = document.getElementById('sopCard');
   if (!ZONE_ID) {
     sopCard.style.display = 'none';
+    currentSopAlertIds = {};
     return;
   }
   const res = await fetchJSON('/dashboard/sop-status');
@@ -1019,10 +1080,13 @@ async function refreshSop() {
 
   if (!res.data) {
     sopCard.style.display = 'none';
+    currentSopAlertIds = {};
     return;
   }
   sopCard.style.display = 'block';
   const ex = res.data;
+  currentSopAlertIds = {};
+  (ex.current_receipts || []).forEach((r) => { currentSopAlertIds[r.alert_id] = ex.id; });
   document.getElementById('sopName').textContent = ex.sop_name || '—';
   document.getElementById('sopStep').textContent =
     'Step ' + ex.current_step_number + ' of ' + ex.total_steps + ' — ' + ex.status.replace(/_/g, ' ');
@@ -1120,22 +1184,39 @@ async function refreshQueue() {
   if (items.length === 0) { el.textContent = 'Queue is empty — nothing playing or waiting.'; return; }
   el.innerHTML = items.map((it) => {
     const maxPlays = (it.max_plays == null) ? '∞' : it.max_plays;
+    const sopExecId = currentSopAlertIds[it.alert_id];
     const badges = [
       it.is_blocking ? '<span class="pill bad">blocking</span>' : '',
       it.requires_ack ? '<span class="pill warn">needs ack</span>' : '<span class="pill idle">auto-ack</span>',
       it.acknowledged ? '<span class="pill ok">acknowledged</span>' : '',
+      sopExecId ? '<span class="pill warn">SOP step — use the SOP card to acknowledge</span>' : '',
     ].filter(Boolean).join(' ');
+    // A SOP-step item's Acknowledge must go through /dashboard/sop-ack (tells
+    // the gateway) rather than the plain edge-local /acknowledge (silently
+    // stops replay here only, leaving the gateway's SopExecution waiting
+    // forever) — both buttons now converge on the correct action either way.
+    const btn = it.acknowledged ? '' : (sopExecId
+      ? '<button data-sop-exec-id="' + sopExecId + '" class="btn-secondary">Acknowledge</button>'
+      : '<button data-ack-id="' + it.alert_id + '" class="btn-secondary">Acknowledge</button>');
     return '<div class="row" style="border-bottom:1px solid #1e293b;padding:8px 0;align-items:flex-start">' +
       '<span>' +
         '<strong>#' + it.alert_id + '</strong> — ' + escapeHtml(it.alert_category || 'alert') +
         ' <span style="color:#64748b">(' + it.play_count + '/' + maxPlays + ' plays)</span><br>' +
         badges +
-      '</span>' +
-      (it.acknowledged ? '' : '<button data-ack-id="' + it.alert_id + '" class="btn-secondary">Acknowledge</button>') +
+      '</span>' + btn +
     '</div>';
   }).join('');
 }
 document.getElementById('queueList').addEventListener('click', (e) => {
+  const sopBtn = e.target.closest('button[data-sop-exec-id]');
+  if (sopBtn) {
+    sopBtn.disabled = true;
+    fetchJSON('/dashboard/sop-ack', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ execution_id: sopBtn.dataset.sopExecId }),
+    }).then(() => { refreshQueue(); refreshSop(); refreshHealth(); });
+    return;
+  }
   const btn = e.target.closest('button[data-ack-id]');
   if (!btn) return;
   btn.disabled = true;

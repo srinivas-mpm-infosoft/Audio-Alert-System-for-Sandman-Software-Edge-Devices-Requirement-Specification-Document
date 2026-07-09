@@ -476,6 +476,10 @@ export default function LogsAudit() {
                   value={auditFilters.user}
                   onChange={(e) => { setAuditFilters((f) => ({ ...f, user: e.target.value })); setAuditPage(1); }}
                 />
+                <button type="button" onClick={() => loadAuditLogs(auditFilters, auditPage, PAGE_SIZE)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 transition-colors" title="Refresh">
+                  <RefreshCw size={13} />
+                </button>
               </div>
               {canExport && (
                 <button type="button" onClick={() => exportCSV(auditLogs, "audit-log.csv")}

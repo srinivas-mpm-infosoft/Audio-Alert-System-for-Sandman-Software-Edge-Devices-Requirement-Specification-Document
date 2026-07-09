@@ -32,8 +32,10 @@ export default function PagingPanel({ defaultOpen = false }) {
   const [errorMsg, setErrorMsg] = useState("");
 
   const wsRef = useRef(null);
-  const recorderRef = useRef(null);
   const streamRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const sourceRef = useRef(null);
+  const processorRef = useRef(null);
   const stateRef = useRef(STATE.IDLE);       // avoids stale-closure reads inside WS callbacks
   const stopFallbackRef = useRef(null);
 
@@ -42,11 +44,66 @@ export default function PagingPanel({ defaultOpen = false }) {
     setState(next);
   }, []);
 
+  // Streams the mic as raw 16kHz mono PCM (320 samples / 640 bytes / 20ms
+  // chunks) instead of MediaRecorder's WebM/Opus — the edge node plays this
+  // straight through aplay with no decoder in the loop, which is what
+  // actually keeps live-paging latency low end to end.
+  const startPcmStreaming = useCallback((stream, ws) => {
+    const audioContext = new AudioContext();
+    audioContextRef.current = audioContext;
+
+    const source = audioContext.createMediaStreamSource(stream);
+    sourceRef.current = source;
+
+    const processor = audioContext.createScriptProcessor(1024, 1, 1);
+    processorRef.current = processor;
+
+    const inputRate = audioContext.sampleRate;
+    const outputRate = 16000;
+    let pcmBuffer = [];
+
+    processor.onaudioprocess = (event) => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+
+      const input = event.inputBuffer.getChannelData(0);
+
+      // Resample browser microphone rate (usually 48 kHz) to 16 kHz
+      const ratio = inputRate / outputRate;
+      const outputLength = Math.floor(input.length / ratio);
+      const resampled = new Float32Array(outputLength);
+      for (let i = 0; i < outputLength; i++) {
+        resampled[i] = input[Math.floor(i * ratio)];
+      }
+
+      for (let i = 0; i < resampled.length; i++) {
+        pcmBuffer.push(resampled[i]);
+      }
+
+      // Exactly 320 samples = 20ms at 16kHz
+      while (pcmBuffer.length >= 320) {
+        const chunk = pcmBuffer.splice(0, 320);
+        const pcm16 = new Int16Array(320);
+        for (let i = 0; i < 320; i++) {
+          const sample = Math.max(-1, Math.min(1, chunk[i]));
+          pcm16[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+        }
+        ws.send(pcm16.buffer);
+      }
+    };
+
+    source.connect(processor);
+    processor.connect(audioContext.destination);
+  }, []);
+
   const cleanup = useCallback(() => {
-    try { recorderRef.current?.state !== "inactive" && recorderRef.current?.stop(); } catch { /* ignore */ }
+    try { processorRef.current?.disconnect(); } catch { /* ignore */ }
+    try { sourceRef.current?.disconnect(); } catch { /* ignore */ }
+    try { audioContextRef.current?.close(); } catch { /* ignore */ }
     try { streamRef.current?.getTracks().forEach((t) => t.stop()); } catch { /* ignore */ }
     try { wsRef.current?.close(); } catch { /* ignore */ }
-    recorderRef.current = null;
+    processorRef.current = null;
+    sourceRef.current = null;
+    audioContextRef.current = null;
     streamRef.current = null;
     wsRef.current = null;
   }, []);
@@ -80,12 +137,7 @@ export default function PagingPanel({ defaultOpen = false }) {
           if (msg.type === "ready") {
             setDeviceCount(msg.devices || 0);
             applyState(STATE.LIVE);
-            const recorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
-            recorderRef.current = recorder;
-            recorder.ondataavailable = (e) => {
-              if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) ws.send(e.data);
-            };
-            recorder.start(250);
+            startPcmStreaming(stream, ws);
           } else if (msg.type === "device_disconnected") {
             setDeviceCount(msg.remaining ?? 0);
             setErrorMsg(`A target node disconnected — ${msg.remaining} device(s) still receiving`);
@@ -114,7 +166,7 @@ export default function PagingPanel({ defaultOpen = false }) {
       applyState(STATE.ERROR);
       cleanup();
     }
-  }, [zoneIds, plantWide, cleanup, applyState]);
+  }, [zoneIds, plantWide, cleanup, applyState, startPcmStreaming]);
 
   const stopTalking = useCallback(() => {
     if (stateRef.current !== STATE.LIVE && stateRef.current !== STATE.CONNECTING) return;

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Upload, Trash2, Plus, Loader2, Volume2, Pencil } from "lucide-react";
 import { getClips, uploadClip, updateClip, deleteClip, getTemplates, createTemplate, updateTemplate, deleteTemplate, saveAudioConfig } from "./api/audio.api";
 import { getZones, updateZone } from "./api/devices.api";
@@ -9,6 +9,7 @@ import { useAuthStore } from "../../store/useAuthStore";
 import { useAppConfigStore } from "../../store/useAppConfigStore";
 import ConfirmDialog from "./components/ConfirmDialog";
 import EmptyState from "./components/EmptyState";
+import RefreshButton from "./components/RefreshButton";
 import { AUDIO_TYPES, PRIORITIES } from "./utils/constants";
 import { formatFileSize, formatDate } from "./utils/formatters";
 import AudioPreviewButton from "./components/AudioPreviewButton";
@@ -49,7 +50,7 @@ export default function AudioConfig() {
     setMasterVolume, setZoneVolume, setPriorityOffset, setAudioType,
     isDirty, markClean } = useAudioConfigStore();
 
-  useEffect(() => {
+  const loadAll = useCallback(() => {
     setLoading(true);
     Promise.all([getClips(), getTemplates(), getZones()]).then(([cr, tr, zr]) => {
       if (cr.ok) setClips(cr.data);
@@ -58,6 +59,8 @@ export default function AudioConfig() {
       setLoading(false);
     });
   }, []);
+
+  useEffect(() => { loadAll(); }, [loadAll]);
 
   // ── duplicate helpers ──────────────────────────────────────
 
@@ -201,13 +204,16 @@ export default function AudioConfig() {
   return (
     <div className="flex flex-col gap-5">
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
-        <div className="flex border-b border-slate-100 overflow-x-auto" role="tablist">
-          {TABS.map((t, i) => (
-            <button key={i} role="tab" aria-selected={tab === i} onClick={() => setTab(i)}
-              className={`px-5 py-3 text-sm font-semibold whitespace-nowrap transition-colors focus:outline-none ${tab === i ? "border-b-2 border-indigo-600 text-indigo-700" : "text-slate-500 hover:text-slate-700"}`}>
-              {t}
-            </button>
-          ))}
+        <div className="flex items-center justify-between border-b border-slate-100">
+          <div className="flex overflow-x-auto" role="tablist">
+            {TABS.map((t, i) => (
+              <button key={i} role="tab" aria-selected={tab === i} onClick={() => setTab(i)}
+                className={`px-5 py-3 text-sm font-semibold whitespace-nowrap transition-colors focus:outline-none ${tab === i ? "border-b-2 border-indigo-600 text-indigo-700" : "text-slate-500 hover:text-slate-700"}`}>
+                {t}
+              </button>
+            ))}
+          </div>
+          <RefreshButton onClick={loadAll} loading={loading} title="Refresh audio config" className="mr-3 shrink-0" />
         </div>
 
         <div className="p-5">

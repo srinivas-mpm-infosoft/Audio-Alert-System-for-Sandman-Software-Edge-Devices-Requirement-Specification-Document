@@ -24,6 +24,7 @@ import threading
 import time
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 import events_bus
 
@@ -33,13 +34,27 @@ _started = False
 _CHECK_INTERVAL_SEC = 5
 
 
+def _clip_abs_path(file_path):
+    # AudioClip.file_path is just a filename, resolved against uploads/clips
+    # at read time (not shared code with flask_backend.py's identical
+    # helper — kept in sync manually, same as other sibling-file duplication
+    # in this codebase). Absolute legacy paths from before this fix still
+    # work as-is, no migration needed.
+    if not file_path:
+        return None
+    p = Path(file_path)
+    if p.is_absolute():
+        return p
+    return Path(__file__).parent / "uploads" / "clips" / file_path
+
+
 def _play_current_step(execution, sop, SopStepExecution, db, dispatch_broadcast, all_zone_codes):
     step = sop.steps[execution.current_step_index]
     zone_codes = list(execution.zone_ids or [])
     if execution.plant_wide:
         zone_codes = all_zone_codes()
 
-    clip_path = step.clip.file_path if (step.clip_id and step.clip) else None
+    clip_path = str(_clip_abs_path(step.clip.file_path)) if (step.clip_id and step.clip) else None
     receipts = dispatch_broadcast(
         zone_codes,
         message=step.message if not clip_path else None,

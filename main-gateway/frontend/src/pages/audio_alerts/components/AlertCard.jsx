@@ -39,7 +39,7 @@ export default function AlertCard({ alert, onAck, compact = false }) {
         <div className="flex items-center gap-4 text-[11px] text-slate-500 flex-wrap pt-1 border-t border-white/60">
           <span className="flex items-center gap-1">
             <MapPin size={11} aria-hidden="true" />
-            {alert.plant} › {alert.line} › {alert.zone}
+            {[alert.plant, alert.line, alert.zone].filter(Boolean).join(" › ") || "—"}
           </span>
           <span className="flex items-center gap-1">
             <Clock size={11} aria-hidden="true" />

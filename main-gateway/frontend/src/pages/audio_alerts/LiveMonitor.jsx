@@ -1,9 +1,11 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useMemo } from "react";
 import { CheckCircle2, Cpu } from "lucide-react";
 import { useAlertsStore } from "../../store/useAlertsStore";
 import { useAlerts } from "./hooks/useAlerts";
+import { useSopExecutions } from "./hooks/useSopExecutions";
 import { useCan } from "./hooks/useCan";
-import { acknowledgeAlert } from "./api/alerts.api";
+import { acknowledgeAlert, acknowledgeBroadcastAlert } from "./api/alerts.api";
+import { acknowledgeSopStep } from "./api/sop.api";
 import { useToast } from "../../components/ToastContext";
 import { useAuthStore } from "../../store/useAuthStore";
 import { useEdgeNodeStatus } from "./hooks/useEdgeNodeStatus";
@@ -13,6 +15,47 @@ import EmptyState from "./components/EmptyState";
 import { PRIORITY_CONFIG } from "./utils/priorityConfig";
 import { PRIORITIES } from "./utils/constants";
 
+// Manual Broadcast / Scheduled dispatches have no AlertEvent row of their
+// own (dispatch_service only writes alert_logs) — the only live signal that
+// one is still in flight is the target edge node's own /health.currently_playing,
+// already polled by useEdgeNodeStatus. Reshape that into an AlertCard-shaped
+// row so it shows up here instead of only in the edge node grid above.
+// ponytail: one row per device (whatever it's playing right now), not a full
+// per-device queue browser — good enough for a glance-able monitor.
+function broadcastAlertsFromEdgeNodes(edgeNodes) {
+  return edgeNodes
+    .filter((d) => d.now_playing?.alert_id && ["broadcast", "scheduled"].includes(d.now_playing.type))
+    .map((d) => ({
+      alert_id: d.now_playing.alert_id,
+      alert_code: d.now_playing.type === "scheduled" ? "SCHEDULED" : "MANUAL",
+      priority: null,
+      message: d.now_playing.name,
+      status: "Active",
+      ack_required: true,
+      zone: d.zone_name || d.zone_id,
+      timestamp: d.now_playing.started_at,
+      source: "broadcast",
+    }));
+}
+
+function sopAlertsFromExecutions(executions) {
+  return executions
+    .filter((ex) => ex.status === "WAITING_FOR_ACKNOWLEDGEMENT")
+    .map((ex) => ({
+      alert_id: `sop-${ex.id}`,
+      execution_id: ex.id,
+      alert_code: "SOP",
+      priority: null,
+      message: `${ex.sop_name} — Step ${ex.current_step_number}/${ex.total_steps}` +
+        (ex.current_step?.message ? `: ${ex.current_step.message}` : ""),
+      status: "Active",
+      ack_required: true,
+      zone: ex.plant_wide ? "Plant-wide" : (ex.zone_ids || []).join(", "),
+      timestamp: ex.step_started_at,
+      source: "sop",
+    }));
+}
+
 export default function LiveMonitor() {
   useAlerts();
 
@@ -20,28 +63,41 @@ export default function LiveMonitor() {
   const [filters, setFilters] = useState({ priorities: [], zones: [], ackStatus: "" });
 
   const { devices: edgeNodes, onlineCount: edgeOnline, totalCount: edgeTotal } = useEdgeNodeStatus();
+  const { executions: sopExecutions } = useSopExecutions({ activeOnly: true });
 
   const showToast = useToast();
   const user = useAuthStore((s) => s.user);
   const canAck = useCan("aa.alerts.ack");
 
+  // Merge all three alert lifecycles this app has (rule-fired AlertEvent
+  // rows, Manual Broadcast/Schedule dispatches, SOP steps) into one list —
+  // each already fetched/live-updated elsewhere, no new polling added here.
+  const mergedAlerts = useMemo(() => [
+    ...alerts.filter((a) => a.status === "Active"),
+    ...broadcastAlertsFromEdgeNodes(edgeNodes),
+    ...sopAlertsFromExecutions(sopExecutions),
+  ], [alerts, edgeNodes, sopExecutions]);
+
   const handleAck = useCallback(async (alert_id) => {
+    const target = mergedAlerts.find((a) => a.alert_id === alert_id);
     try {
-      const res = await acknowledgeAlert(alert_id, "", user?.username);
+      const res = target?.source === "sop"
+        ? await acknowledgeSopStep(target.execution_id)
+        : target?.source === "broadcast"
+        ? await acknowledgeBroadcastAlert(alert_id)
+        : await acknowledgeAlert(alert_id, "", user?.username);
       if (res.ok) {
         ackAlert(alert_id);
         showToast("Alert acknowledged successfully", "success");
       } else {
-        showToast("Failed to acknowledge alert", "error");
+        showToast(res.error || "Failed to acknowledge alert", "error");
       }
     } catch {
       showToast("Network error", "error");
     }
-  }, [ackAlert, showToast, user]);
+  }, [mergedAlerts, ackAlert, showToast, user]);
 
-  // Filter active alerts
-  const activeAlerts = alerts.filter((a) => a.status === "Active");
-  const filteredAlerts = activeAlerts.filter((a) => {
+  const filteredAlerts = mergedAlerts.filter((a) => {
     if (filters.priorities.length && !filters.priorities.includes(a.priority)) return false;
     if (filters.zones.length && !filters.zones.includes(a.zone_id)) return false;
     if (filters.ackStatus === "acked" && !a.ack_time) return false;

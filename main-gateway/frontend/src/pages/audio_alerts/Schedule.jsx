@@ -5,6 +5,7 @@ import { useCan } from "./hooks/useCan";
 import { useToast } from "../../components/ToastContext";
 import ConfirmDialog from "./components/ConfirmDialog";
 import EmptyState from "./components/EmptyState";
+import RefreshButton from "./components/RefreshButton";
 import ScheduleForm from "./ScheduleForm";
 import { formatTimestamp } from "./utils/formatters";
 import { scheduleSummary } from "./utils/scheduleSummary";
@@ -103,6 +104,8 @@ export default function Schedule() {
           <span className="text-sm font-semibold">Scheduled Announcements</span>
           <span className="text-xs text-slate-400">— shift reminders, safety messages, recurring PA announcements</span>
         </div>
+        <div className="flex items-center gap-2">
+        <RefreshButton onClick={load} loading={loading} title="Refresh schedules" />
         {canEdit && (
           <button
             type="button"
@@ -112,6 +115,7 @@ export default function Schedule() {
             <Plus size={15} aria-hidden="true" /> New Schedule
           </button>
         )}
+        </div>
       </div>
 
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">

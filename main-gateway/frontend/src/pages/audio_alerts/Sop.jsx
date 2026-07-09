@@ -10,6 +10,7 @@ import { useToast } from "../../components/ToastContext";
 import { useDashboardEvents } from "./hooks/useDashboardEvents";
 import ConfirmDialog from "./components/ConfirmDialog";
 import EmptyState from "./components/EmptyState";
+import RefreshButton from "./components/RefreshButton";
 import SopForm from "./SopForm";
 import { formatTimestamp } from "./utils/formatters";
 import {
@@ -349,7 +350,8 @@ export default function Sop() {
         {/* Manage */}
         {tab === "manage" && (
           <div className="p-4 flex flex-col gap-4">
-            <div className="flex justify-end">
+            <div className="flex justify-end gap-2">
+              <RefreshButton onClick={load} loading={loading} title="Refresh SOP list" />
               {canEdit && (
                 <button type="button" onClick={() => { setEditTarget(null); setShowForm(true); }}
                   className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-semibold">

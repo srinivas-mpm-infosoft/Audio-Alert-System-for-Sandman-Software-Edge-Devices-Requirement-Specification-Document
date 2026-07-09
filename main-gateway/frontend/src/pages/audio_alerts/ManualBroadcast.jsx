@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Megaphone, Loader2, Upload } from "lucide-react";
 import { broadcastManual } from "./api/alerts.api";
 import { useToast } from "../../components/ToastContext";
@@ -8,6 +8,7 @@ import LanguagePicker from "./components/LanguagePicker";
 import AudioPreviewButton from "./components/AudioPreviewButton";
 import AlertTypeOverrideFields from "./components/AlertTypeOverrideFields";
 import { getClips, uploadClip } from "./api/audio.api";
+import RefreshButton from "./components/RefreshButton";
 
 export default function ManualBroadcast() {
   const showToast = useToast();
@@ -20,13 +21,17 @@ export default function ManualBroadcast() {
   const [broadcastBusy, setBroadcastBusy] = useState(false);
   const [broadcastConfirm, setBroadcastConfirm] = useState(false);
   const [clips, setClips] = useState([]);
+  const [clipsLoading, setClipsLoading] = useState(false);
   const [clipUploading, setClipUploading] = useState(false);
   const [override, setOverride] = useState({ type_code: null, play_count_override: null, requires_ack_override: null });
   const clipFileRef = useRef(null);
 
-  useEffect(() => {
-    getClips().then((r) => { if (r.ok) setClips(r.data); });
+  const loadClips = useCallback(() => {
+    setClipsLoading(true);
+    getClips().then((r) => { if (r.ok) setClips(r.data); }).finally(() => setClipsLoading(false));
   }, []);
+
+  useEffect(() => { loadClips(); }, [loadClips]);
 
   const handleInlineUpload = async (file) => {
     if (!file) return;
@@ -81,6 +86,7 @@ export default function ManualBroadcast() {
           <span className="text-sm font-semibold">Manual Broadcast</span>
           <span className="text-xs text-slate-400">— broadcast a message to zone speakers now</span>
         </div>
+        <RefreshButton onClick={loadClips} loading={clipsLoading} title="Refresh clip list" />
       </div>
 
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 flex flex-col gap-4">

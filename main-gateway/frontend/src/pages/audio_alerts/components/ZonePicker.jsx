@@ -27,11 +27,17 @@ export default function ZonePicker({ selected = [], onChange, label = "Zones", d
   return (
     <div ref={ref} className="relative">
       <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block">{label}</label>
-      <button
-        type="button"
+      {/* A <div role="button"> here, not a <button> — the "Remove" chips
+          below are real <button>s, and HTML forbids nesting <button> inside
+          <button> (browsers silently break out of it, which was causing a
+          React hydration-mismatch warning and unreliable chip clicks). */}
+      <div
+        role="button"
+        tabIndex={disabled ? -1 : 0}
         onClick={() => !disabled && setOpen((o) => !o)}
-        disabled={disabled}
-        className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 focus:border-zinc-400 text-slate-700 flex items-center justify-between min-h-[38px]"
+        onKeyDown={(e) => { if (!disabled && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); setOpen((o) => !o); } }}
+        aria-disabled={disabled}
+        className={`w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 focus:border-zinc-400 text-slate-700 flex items-center justify-between min-h-[38px] cursor-pointer ${disabled ? "opacity-50 cursor-not-allowed" : ""}`}
         aria-haspopup="listbox"
         aria-expanded={open}
       >
@@ -55,7 +61,7 @@ export default function ZonePicker({ selected = [], onChange, label = "Zones", d
           )}
         </div>
         <ChevronDown size={14} className={`text-slate-400 shrink-0 transition-transform ${open ? "rotate-180" : ""}`} aria-hidden="true" />
-      </button>
+      </div>
 
       {open && (
         <div className="absolute z-50 top-full mt-1 w-full bg-white border border-slate-200 rounded-xl shadow-lg max-h-60 overflow-y-auto" role="listbox" aria-multiselectable="true">

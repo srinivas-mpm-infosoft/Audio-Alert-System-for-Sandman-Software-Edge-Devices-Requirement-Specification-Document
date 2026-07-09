@@ -378,7 +378,7 @@ def _get_zone_for_foundry_line(conn, foundry_line_id) -> Optional[dict]:
     try:
         with conn.cursor() as c:
             # Try direct foundry_line_id column if it exists
-            c.execute("SELECT * FROM zones WHERE foundry_line_id=%s LIMIT 1",
+            c.execute("SELECT * FROM zones WHERE line_id=%s LIMIT 1",
                       (foundry_line_id,))
             row = c.fetchone()
             if row:

@@ -275,6 +275,25 @@ for _f, _d in {
 app = Flask(__name__, static_folder=str(STATIC), static_url_path="/static")
 sock = Sock(app)
 
+
+@app.before_request
+def _disable_ws_permessage_deflate():
+    # simple-websocket (used by flask-sock) always offers permessage-deflate
+    # and its compressor/decompressor state is not safe against its own
+    # per-connection background thread: a route that both receives a steady
+    # stream of frames (filling that thread's read loop) and calls ws.send()
+    # from the request thread — exactly /audio-alerts/paging/ws's pattern —
+    # corrupts the deflate stream within a handful of messages, surfacing to
+    # the browser as "WebSocket ... failed: Invalid frame header". Stripping
+    # the client's offered extension here means the negotiation never
+    # agrees to compress, so every frame is self-contained and immune to
+    # this race. Confirmed with a live repro: identical concurrent
+    # send+receive load corrupted messages with the header present, and ran
+    # cleanly (600+ messages, zero failures) with it stripped.
+    if request.environ.get("HTTP_UPGRADE", "").lower() == "websocket":
+        request.environ.pop("HTTP_SEC_WEBSOCKET_EXTENSIONS", None)
+
+
 app.secret_key = "X7f1m+oJ6q8wR2t9UeY3pF4zN0hKd1sQjM5aV8bZc2xT7nL0oR5vH3gC6dP9yW4k"
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,

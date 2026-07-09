@@ -124,20 +124,9 @@ def _next_normal() -> Optional[dict]:
 
 _device_cache=[None]; _device_lock=Lock()
 
-def _get_audio_device() -> Optional[str]:
-    with _device_lock:
-        if _device_cache[0] is None:
-            try:
-                r=subprocess.run(['aplay','-l'],capture_output=True,text=True,timeout=5)
-                for line in r.stdout.splitlines():
-                    if 'usb' in line.lower():
-                        m=re.search(r'card\s+(\d+).*device\s+(\d+)',line,re.IGNORECASE)
-                        if m:
-                            hw=f"hw:{m.group(1)},{m.group(2)}"
-                            log.info(f"[Audio] USB: {hw}"); _device_cache[0]=hw; break
-                if _device_cache[0] is None: _device_cache[0]=''
-            except Exception: _device_cache[0]=''
-    return _device_cache[0] or None
+def _get_audio_device() -> str:
+    # Raspberry Pi 3.5 mm analog audio jack
+    return 'hw:Headphones,0'
 
 # ══════════════════════════════════════════════════════════════════════════════
 # System health  (CPU temp / uptime / mem — for the dashboard's node-health panel)
@@ -251,52 +240,77 @@ _playing=[None]; _play_lock=Lock()
 _current_proc      = [None]   # live subprocess.Popen handle for the in-flight _play_file, or None
 _playing_priority  = [None]   # alert_category string ('Critical'/'High'/'Normal'/'Low') of what's in flight
 
+
 def _play_file(audio_path: str, alert_id: int, alert_category: str) -> str:
     """
-    Play audio file via cvlc. Blocks until done, interrupted (paging
-    preemption via _current_proc[0].terminate()), or failed.
-    Returns one of: 'completed', 'interrupted', 'failed'.
+    Play audio using the same default audio path as manual cvlc playback.
     """
-    device=_get_audio_device()
-    cmd=['cvlc','--play-and-exit','--quiet']
-    if device: cmd+=['--aout=alsa',f'--alsa-audio-device={device}']
-    cmd.append(audio_path)
+
+    cmd = [
+        'cvlc',
+        '--play-and-exit',
+        '--quiet',
+        audio_path
+    ]
+
     with _play_lock:
-        _playing[0]=alert_id
-        _playing_priority[0]=alert_category
-    t0=time.monotonic()
-    log.info(f"[Play] START alert={alert_id} cat={alert_category}  "
-             f"device={device or 'default'}")
-    result='failed'
+        _playing[0] = alert_id
+        _playing_priority[0] = alert_category
+
+    t0 = time.monotonic()
+
+    log.info(
+        f"[Play] START alert={alert_id} "
+        f"cat={alert_category}"
+    )
+
+    result = 'failed'
+
     try:
-        proc=subprocess.Popen(cmd,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
         with _play_lock:
-            _current_proc[0]=proc
+            _current_proc[0] = proc
+
         try:
             proc.wait(timeout=120)
+
         except subprocess.TimeoutExpired:
             log.error(f"[Play] Timeout alert={alert_id}")
             proc.kill()
             proc.wait()
-        log.info(f"[Play] DONE  alert={alert_id}  "
-                 f"{time.monotonic()-t0:.2f}s  code={proc.returncode}")
-        if proc.returncode==0:
-            result='completed'
-        elif proc.returncode is not None and proc.returncode<0:
-            result='interrupted'
+
+        log.info(
+            f"[Play] DONE alert={alert_id} "
+            f"{time.monotonic() - t0:.2f}s "
+            f"code={proc.returncode}"
+        )
+
+        if proc.returncode == 0:
+            result = 'completed'
+        elif proc.returncode is not None and proc.returncode < 0:
+            result = 'interrupted'
         else:
-            result='failed'
+            result = 'failed'
+
     except FileNotFoundError:
-        log.error("[Play] cvlc not found — sudo apt install vlc")
-        result='failed'
+        log.error("[Play] cvlc not found")
+        result = 'failed'
+
     except Exception as e:
         log.error(f"[Play] Error: {e}")
-        result='failed'
+        result = 'failed'
+
     finally:
         with _play_lock:
-            _playing[0]=None
-            _playing_priority[0]=None
-            _current_proc[0]=None
+            _playing[0] = None
+            _playing_priority[0] = None
+            _current_proc[0] = None
+
     return result
 
 def _play_item(item: dict) -> str:

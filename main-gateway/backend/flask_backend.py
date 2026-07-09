@@ -1010,6 +1010,11 @@ class SopExecution(db.Model):
     step_started_at     = Column(DateTime)     # when the current step began waiting for ack
     completed_at        = Column(DateTime)
     error               = Column(Text)
+    current_receipts    = Column(JSON)         # [{device_ip, alert_id}, ...] currently queued on edge
+                                                # nodes for this step — needed so acknowledge/cancel/
+                                                # timeout-replay can tell those edge nodes to stop
+                                                # repeating it (High-priority items replay every 20s
+                                                # on the edge node until it gets its own /acknowledge).
 
     sop = relationship("Sop", foreign_keys=[sop_id])
 
@@ -2998,7 +3003,7 @@ def aa_sop_ack(execution_id):
     out, error = sop_service.acknowledge(
         app, db, SopExecution, SopStepExecution,
         dispatch_service.dispatch_broadcast, dispatch_service.all_zone_codes,
-        execution_id, user,
+        execution_id, user, acknowledge_on_edge=dispatch_service.acknowledge_on_edge,
     )
     if error:
         return jsonify(ok=False, error=error), 400
@@ -3014,7 +3019,8 @@ def aa_sop_cancel(execution_id):
     if not _can("aa.sop.run"):
         return jsonify(ok=False, error="Permission denied"), 403
     user = _current_user().get("username", "unknown")
-    out, error = sop_service.cancel(app, db, SopExecution, SopStepExecution, execution_id, user)
+    out, error = sop_service.cancel(app, db, SopExecution, SopStepExecution, execution_id, user,
+                                    acknowledge_on_edge=dispatch_service.acknowledge_on_edge)
     if error:
         return jsonify(ok=False, error=error), 400
     _add_audit("sop.cancel", f"sop-execution/{execution_id}", f"SOP cancelled: {out['sop_name']}", after=out)
@@ -3978,7 +3984,7 @@ def aa_edge_sop_ack():
     out, error = sop_service.acknowledge(
         app, db, SopExecution, SopStepExecution,
         dispatch_service.dispatch_broadcast, dispatch_service.all_zone_codes,
-        execution_id, f"edge:{zone_code}",
+        execution_id, f"edge:{zone_code}", acknowledge_on_edge=dispatch_service.acknowledge_on_edge,
     )
     if error:
         # e.g. already acknowledged by someone else — safe no-op, not a crash
@@ -4673,6 +4679,7 @@ def _run_migrations():
         # "WAITING_FOR_ACKNOWLEDGEMENT" is 27 chars — widen the already-created
         # column (MODIFY COLUMN is safe to re-run; no-op once already 32).
         "ALTER TABLE sop_executions MODIFY COLUMN status VARCHAR(32)",
+        "ALTER TABLE sop_executions ADD COLUMN IF NOT EXISTS current_receipts JSON",
         # New tables created automatically by SQLAlchemy — no ALTER needed
         # but we add them here as safety guards:
         """CREATE TABLE IF NOT EXISTS zone_language_configs (
@@ -4886,6 +4893,7 @@ if __name__ == "__main__":
     sop_service.start_timeout_checker(
         app, db, SopExecution, SopStepExecution,
         dispatch_service.dispatch_broadcast, dispatch_service.all_zone_codes,
+        acknowledge_on_edge=dispatch_service.acknowledge_on_edge,
     )
     mqtt_service.start(
         _db_cfg,

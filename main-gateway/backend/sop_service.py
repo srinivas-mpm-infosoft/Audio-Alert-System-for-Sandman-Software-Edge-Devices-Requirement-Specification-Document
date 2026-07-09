@@ -57,8 +57,31 @@ def _play_current_step(execution, sop, SopStepExecution, db, dispatch_broadcast,
             language=step.language, operator=execution.started_by,
             retry_count=execution.retry_count,
         ))
+    # Remember what's now queued on each edge node so acknowledge()/cancel()/
+    # timeout-replay can explicitly clear it — step audio is High priority,
+    # which the edge node replays every ~20s on its own until it gets an
+    # /acknowledge for that exact alert_id (advancing the SOP step here only
+    # updates this DB row; it doesn't by itself stop the edge node's replay).
+    execution.current_receipts = [
+        {"device_ip": r["device_ip"], "alert_id": r["alert_id"]}
+        for r in receipts if r.get("device_ip") and r.get("alert_id")
+    ]
     db.session.commit()
     return receipts
+
+
+def _clear_current_receipts(execution, acknowledge_on_edge):
+    """Tell every edge node holding this step's audio to stop replaying it.
+    Best-effort: an unreachable edge node shouldn't block the SOP state
+    transition, it just means that one node keeps repeating until its own
+    queue self-clears or it's restarted."""
+    for r in (execution.current_receipts or []):
+        try:
+            acknowledge_on_edge(r["device_ip"], r["alert_id"])
+        except Exception as e:
+            log.warning("[SOP] acknowledge_on_edge(%s, %s) failed: %s",
+                       r.get("device_ip"), r.get("alert_id"), e)
+    execution.current_receipts = []
 
 
 def start_execution(app, db, Sop, SopExecution, SopStepExecution, dispatch_broadcast, all_zone_codes, sop_id, user):
@@ -96,7 +119,8 @@ def start_execution(app, db, Sop, SopExecution, SopStepExecution, dispatch_broad
         return out, None
 
 
-def acknowledge(app, db, SopExecution, SopStepExecution, dispatch_broadcast, all_zone_codes, execution_id, user):
+def acknowledge(app, db, SopExecution, SopStepExecution, dispatch_broadcast, all_zone_codes,
+                execution_id, user, acknowledge_on_edge=None):
     with app.app_context():
         execution = SopExecution.query.filter_by(execution_code=execution_id).first()
         if not execution:
@@ -112,6 +136,8 @@ def acknowledge(app, db, SopExecution, SopStepExecution, dispatch_broadcast, all
             audio_mode=step.audio_mode, language=step.language,
             operator=user, retry_count=execution.retry_count,
         ))
+        if acknowledge_on_edge:
+            _clear_current_receipts(execution, acknowledge_on_edge)
 
         next_index = execution.current_step_index + 1
         if next_index >= len(sop.steps):
@@ -145,7 +171,7 @@ def acknowledge(app, db, SopExecution, SopStepExecution, dispatch_broadcast, all
         return out, None
 
 
-def cancel(app, db, SopExecution, SopStepExecution, execution_id, user):
+def cancel(app, db, SopExecution, SopStepExecution, execution_id, user, acknowledge_on_edge=None):
     with app.app_context():
         execution = SopExecution.query.filter_by(execution_code=execution_id).first()
         if not execution:
@@ -153,6 +179,8 @@ def cancel(app, db, SopExecution, SopStepExecution, execution_id, user):
         if execution.status in ("COMPLETED", "CANCELLED", "FAILED"):
             return execution.to_dict(), None
 
+        if acknowledge_on_edge:
+            _clear_current_receipts(execution, acknowledge_on_edge)
         execution.status = "CANCELLED"
         execution.completed_at = datetime.now()
         db.session.add(SopStepExecution(
@@ -178,7 +206,8 @@ def has_active_execution(Sop, SopExecution, sop_db_id):
 # Background timeout/replay checker
 # ============================================================
 
-def _check_timeouts(app, db, SopExecution, SopStepExecution, dispatch_broadcast, all_zone_codes):
+def _check_timeouts(app, db, SopExecution, SopStepExecution, dispatch_broadcast, all_zone_codes,
+                    acknowledge_on_edge=None):
     with app.app_context():
         now = datetime.now()
         due = SopExecution.query.filter(SopExecution.status == "WAITING_FOR_ACKNOWLEDGEMENT").all()
@@ -198,6 +227,11 @@ def _check_timeouts(app, db, SopExecution, SopStepExecution, dispatch_broadcast,
                     audio_mode=step.audio_mode, language=step.language,
                     operator=execution.started_by, retry_count=execution.retry_count,
                 ))
+                # Clear the previous dispatch's queued audio before replaying —
+                # otherwise the old copy keeps repeating on the edge node
+                # alongside the new one, compounding on every retry.
+                if acknowledge_on_edge:
+                    _clear_current_receipts(execution, acknowledge_on_edge)
                 db.session.commit()
                 _play_current_step(execution, sop, SopStepExecution, db, dispatch_broadcast, all_zone_codes)
                 execution.step_started_at = datetime.now()
@@ -210,17 +244,19 @@ def _check_timeouts(app, db, SopExecution, SopStepExecution, dispatch_broadcast,
                 db.session.rollback()
 
 
-def _loop(app, db, SopExecution, SopStepExecution, dispatch_broadcast, all_zone_codes):
+def _loop(app, db, SopExecution, SopStepExecution, dispatch_broadcast, all_zone_codes, acknowledge_on_edge=None):
     log.info("[SOP] Timeout/replay checker started — every %ss", _CHECK_INTERVAL_SEC)
     while True:
         try:
-            _check_timeouts(app, db, SopExecution, SopStepExecution, dispatch_broadcast, all_zone_codes)
+            _check_timeouts(app, db, SopExecution, SopStepExecution, dispatch_broadcast, all_zone_codes,
+                           acknowledge_on_edge)
         except Exception as e:
             log.error("[SOP] loop error: %s", e)
         time.sleep(_CHECK_INTERVAL_SEC)
 
 
-def start_timeout_checker(app, db, SopExecution, SopStepExecution, dispatch_broadcast, all_zone_codes, interval_sec=5):
+def start_timeout_checker(app, db, SopExecution, SopStepExecution, dispatch_broadcast, all_zone_codes,
+                          interval_sec=5, acknowledge_on_edge=None):
     global _started, _CHECK_INTERVAL_SEC
     if _started:
         return
@@ -228,6 +264,6 @@ def start_timeout_checker(app, db, SopExecution, SopStepExecution, dispatch_broa
     _started = True
     threading.Thread(
         target=_loop,
-        args=(app, db, SopExecution, SopStepExecution, dispatch_broadcast, all_zone_codes),
+        args=(app, db, SopExecution, SopStepExecution, dispatch_broadcast, all_zone_codes, acknowledge_on_edge),
         daemon=True, name="sop-timeout",
     ).start()

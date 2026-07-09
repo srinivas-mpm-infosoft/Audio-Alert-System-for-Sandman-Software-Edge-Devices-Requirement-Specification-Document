@@ -83,10 +83,7 @@ export default function AudioAlerts({ subTab = "live", user }) {
 
         {/* Status strip */}
         <div className="mt-4 flex flex-wrap items-center gap-3 text-sm">
-          <div className="flex items-center gap-1 text-[11px] text-slate-500">
-            <Cpu size={12} aria-hidden="true" />
-            <span>{gatewaysUp}/{gatewaysTotal} Edge Nodes up</span>
-          </div>
+
           {lastSync && (
             <>
               <div className="h-4 w-px bg-slate-200" aria-hidden="true" />

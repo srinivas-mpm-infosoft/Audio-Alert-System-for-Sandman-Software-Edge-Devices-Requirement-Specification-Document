@@ -51,7 +51,7 @@ const AA_SUB_ITEMS = [
   // Rule Builder hidden from navigation for now — kept here (commented) for easy re-enable.
   // { id: "aa-rules",     icon: Sliders,   label: "Rule Builder",    perm: "aa.rules.view", group: "Send Alert" },
   { id: "aa-schedule",   icon: CalendarClock, label: "Schedule",         perm: "aa.schedule.view",    group: "Plan Ahead" },
-  { id: "aa-analytics",  icon: BarChart3,     label: "Analytics",        perm: "aa.analytics.view",   group: "Reports" },
+  // { id: "aa-analytics",  icon: BarChart3,     label: "Analytics",        perm: "aa.analytics.view",   group: "Reports" },
   { id: "aa-logs",       icon: FileText,      label: "Logs",             perm: "aa.logs.view",        group: "Reports" },
 ];
 

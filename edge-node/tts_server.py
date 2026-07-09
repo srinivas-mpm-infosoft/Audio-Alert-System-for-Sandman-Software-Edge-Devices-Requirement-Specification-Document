@@ -48,7 +48,7 @@ from google import genai
 # USER CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-GEMINI_API_KEY     = os.getenv('GEMINI_API_KEY',     'AQ.Ab8RN6KL2DV91przhGMEWehRbeNOsH1bP03v6WuIVQ_WVEM6FQ')
+GEMINI_API_KEY     = os.getenv('GEMINI_API_KEY',     'AQ.Ab8RN6IOmmWBJyDHcJ2tfgYtuNu_qxj5fGyVaf5q9T8Z-bHLQw')
 VOICEMAKER_API_KEY = os.getenv('VOICEMAKER_API_KEY', '8c19dc20-12aa-11ef-8d6e-49a96d622f69')
 
 TTS_GENDER    = 'male'

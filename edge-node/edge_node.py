@@ -421,6 +421,17 @@ app = Flask(__name__)
 sock = Sock(app)
 
 
+@app.before_request
+def _disable_ws_permessage_deflate():
+    # Same fix as flask_backend.py's gateway routes, applied here for the
+    # gateway's outbound connection into this node's /paging/ws — see that
+    # file for the full explanation (simple-websocket's compressor state
+    # isn't safe against its own per-connection background thread when a
+    # route both receives a steady stream and sends from the request thread).
+    if request.environ.get("HTTP_UPGRADE", "").lower() == "websocket":
+        request.environ.pop("HTTP_SEC_WEBSOCKET_EXTENSIONS", None)
+
+
 # Fallback behavior when a caller doesn't send resolved AlertTypeConfig
 # fields (e.g. edge_node_mqtt.py's MQTT play subscriber, which predates the
 # config-driven engine) — reproduces the original hardcoded rules exactly.
@@ -987,6 +998,7 @@ _DASHBOARD_HTML = """<!doctype html>
 
 <script>
 const ZONE_ID = %(zone_id_json)s;
+const GATEWAY_URL_DISPLAY = %(gateway_url_json)s;
 let ackInFlight = false;
 
 function fmtUptime(sec) {
@@ -1049,7 +1061,11 @@ async function refreshGatewayStatus() {
   const gwEl = document.getElementById('gwStatus');
   const res = await fetchJSON('/dashboard/ping');
   if (!res.ok) {
-    gwEl.textContent = 'unreachable';
+    // Show the real reason (e.g. "Connection refused" / bad host) instead of
+    // a bare "unreachable" — almost always means GATEWAY_URL is misconfigured
+    // for this node (it defaults to http://localhost:8000, which is only
+    // correct if this edge node runs on the same machine as the gateway).
+    gwEl.textContent = 'unreachable: ' + (res.error || 'no response') + ' (check GATEWAY_URL=' + GATEWAY_URL_DISPLAY + ')';
     gwEl.className = 'pill bad';
     return;
   }
@@ -1265,6 +1281,7 @@ def dashboard():
     return _DASHBOARD_HTML % {
         'zone_id': ZONE_ID or '(not configured)',
         'zone_id_json': json.dumps(ZONE_ID),
+        'gateway_url_json': json.dumps(GATEWAY_URL),
     }
 
 

@@ -138,8 +138,23 @@ export default function IOSettings({ role = "admin", isReadOnly, subTab = "gener
                     },
                     {
                       name: "modbusTCP",
-                      label: "Modbus TCP/IP Protocol",
+                      label: "PLC",
                       checked: config.ioSettings?.settings?.modbusTCP,
+                    },
+                                        {
+                      name: "modbusTCP",
+                      label: "Scada",
+                      checked: config.ioSettings?.settings?.modbusTCP,
+                    },
+                    {
+                      name: "modbusTCP",
+                      label: "HMI",
+                      checked: config.ioSettings?.settings?.modbusTCP,
+                    },
+                                        {
+                      name: "mqtt",
+                      label: "MQTT",
+                      checked: config.ioSettings?.settings?.mqtt,
                     },
                     // {
                     //   name: "analog",

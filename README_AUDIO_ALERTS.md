@@ -9,11 +9,21 @@ Module: Audio Alert System for SandMan Software & Edge Devices
 
 ```
 main-gateway/
-├── backend/     — flask_backend.py + dispatch/heartbeat/scheduler/sop/mqtt services (port 8000)
-└── frontend/    — the Vite/React dashboard (this module lives under src/pages/audio_alerts/)
-edge-node/       — edge_node.py (port 5000, one per speaker), alert_poller.py (port 7000),
-                   tts_server.py (port 6000) — deployed on-device, not on the gateway
+├── backend/       — flask_backend.py + dispatch/heartbeat/scheduler/sop/mqtt services (port 8000)
+├── frontend/      — legacy dashboard, no longer the active frontend (kept as-is, not modified)
+└── frontend New/  — the ACTIVE Vite/React dashboard (this module lives under src/pages/audio_alerts/),
+                     scoped to only the Audio Alert System — I/O Settings, Database, WiFi/4G, and
+                     Admin Settings' unrelated hardware config were removed from its sidebar
+edge-node/         — edge_node.py (port 5000, one per speaker; also serves the simplified
+                     /display Edge Node UI), alert_poller.py (port 7000),
+                     tts_server.py (port 6000) — deployed on-device, not on the gateway
 ```
+
+Run the frontend from `main-gateway/frontend New/` (not `main-gateway/frontend/`).
+
+See `MQTT_SETUP.md` (repo root) for MQTT transport setup — every Edge Node can
+be configured for HTTP or MQTT independently (Devices & Zones → add/edit
+device), HTTP remains the default and fully working transport.
 
 Run the Main Gateway backend:
 ```bash
@@ -23,7 +33,7 @@ python3 flask_backend.py        # http://localhost:8000
 
 Run the Main Gateway frontend:
 ```bash
-cd main-gateway/frontend
+cd "main-gateway/frontend New"
 npm install                     # first time only
 npm run dev                     # http://localhost:5173 (or `npm run build` for production)
 ```

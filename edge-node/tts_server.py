@@ -29,10 +29,12 @@ import logging
 import os
 import queue as _queue_module
 import re
+import struct
 import subprocess
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 from threading import Lock
 from typing import Optional, List
@@ -41,6 +43,8 @@ import requests
 import websocket
 import pymysql
 import pymysql.cursors
+
+from mqtt_audio_protocol import ack_topic, play_topic
 from flask import Flask, request, jsonify, Response
 from google import genai
 
@@ -48,7 +52,7 @@ from google import genai
 # USER CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-GEMINI_API_KEY     = os.getenv('GEMINI_API_KEY',     'AQ.Ab8RN6IOmmWBJyDHcJ2tfgYtuNu_qxj5fGyVaf5q9T8Z-bHLQw')
+GEMINI_API_KEY     = os.getenv('GEMINI_API_KEY',     'AQ.Ab8RN6LySyzVrq3vtoIc8uOTH_f-TLu80Mov-U7FxkkhrxMlcQ')
 VOICEMAKER_API_KEY = os.getenv('VOICEMAKER_API_KEY', '8c19dc20-12aa-11ef-8d6e-49a96d622f69')
 
 TTS_GENDER    = 'male'
@@ -551,27 +555,146 @@ def resolve_alert_type_behavior(type_code: str) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# MQTT delivery — used instead of HTTP when the target device's Central
+# Gateway config has protocol="mqtt" (mqtt_cfg carries its broker/topic
+# config, read straight out of the /synthesise request body). One client per
+# unique broker config is cached and reused (connect-once, publish-many) —
+# request/reply needs an already-connected, subscribed client, so a bare
+# one-shot publish-and-disconnect wouldn't be able to wait for the edge
+# node's ack the way the HTTP path waits for its response.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_MQTT_REPLY_TIMEOUT_SEC = 10
+_mqtt_clients: dict = {}
+_mqtt_clients_lock = Lock()
+_mqtt_pending: dict = {}
+_mqtt_pending_lock = Lock()
+
+
+def _mqtt_pack_play(header: dict, mp3: bytes) -> bytes:
+    header_bytes = json.dumps(header).encode('utf-8')
+    return struct.pack('>I', len(header_bytes)) + header_bytes + mp3
+
+
+def _mqtt_on_reply(client, userdata, msg):
+    try:
+        data = json.loads(msg.payload.decode('utf-8'))
+    except Exception as e:
+        log.warning(f"[MQTT] Bad reply on {msg.topic}: {e}")
+        return
+    with _mqtt_pending_lock:
+        waiter = _mqtt_pending.get(data.get('request_id'))
+    if waiter is not None:
+        waiter['result'] = data
+        waiter['event'].set()
+
+
+def _mqtt_get_client(cfg: dict):
+    host, port = cfg.get('mqtt_broker_host'), int(cfg.get('mqtt_broker_port') or 1883)
+    username = cfg.get('mqtt_username')
+    key = (host, port, username)
+    with _mqtt_clients_lock:
+        client = _mqtt_clients.get(key)
+        if client is not None:
+            return client
+        import paho.mqtt.client as mqtt
+        client_id = cfg.get('mqtt_client_id') or f"tts-server-{uuid.uuid4().hex[:8]}"
+        try:
+            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
+        except AttributeError:
+            client = mqtt.Client(client_id=client_id)
+        if username:
+            client.username_pw_set(username, cfg.get('mqtt_password') or '')
+        client.on_message = _mqtt_on_reply
+        client.connect(host, port, keepalive=30)
+        client.subscribe('sandman/audio/+/play/ack', qos=1)
+        client.subscribe('sandman/audio/+/acknowledge/ack', qos=1)
+        client.loop_start()
+        log.info(f"[MQTT] Connected to {host}:{port}")
+        _mqtt_clients[key] = client
+        return client
+
+
+def _mqtt_request_reply(cfg: dict, topic: str, payload, request_id: str):
+    event = threading.Event()
+    waiter = {'event': event, 'result': None}
+    with _mqtt_pending_lock:
+        _mqtt_pending[request_id] = waiter
+    try:
+        _mqtt_get_client(cfg).publish(topic, payload, qos=1)
+        if not event.wait(timeout=_MQTT_REPLY_TIMEOUT_SEC):
+            return None
+        return waiter['result']
+    finally:
+        with _mqtt_pending_lock:
+            _mqtt_pending.pop(request_id, None)
+
+
+def _deliver_to_edge_mqtt(mp3: bytes, mqtt_cfg: dict, alert_id: int, alert_category: str,
+                          lang_code: str, text: str, zone_code: str,
+                          behavior: Optional[dict] = None) -> dict:
+    if not zone_code or not mqtt_cfg.get('mqtt_broker_host'):
+        return {'edge_delivered': False, 'audio_queued': False, 'critical_active': False,
+                'error': 'MQTT broker host / zone_code required'}
+    request_id = uuid.uuid4().hex
+    header = {'request_id': request_id, 'alert_id': alert_id, 'alert_category': alert_category,
+              'lang_code': lang_code, 'text': text, **(behavior or {})}
+    log.info(f"[MQTT] Publish play alert={alert_id} → {play_topic(zone_code)} ({len(mp3)//1024}KB)")
+    try:
+        reply = _mqtt_request_reply(mqtt_cfg, play_topic(zone_code), _mqtt_pack_play(header, mp3), request_id)
+    except Exception as exc:
+        log.error(f"[MQTT] Delivery failed: {exc}")
+        return {'edge_delivered': False, 'audio_queued': False, 'critical_active': False, 'error': str(exc)}
+    if reply is None:
+        log.warning(f"[MQTT] No ack for alert={alert_id} within {_MQTT_REPLY_TIMEOUT_SEC}s")
+        return {'edge_delivered': False, 'audio_queued': False, 'critical_active': False,
+                'error': 'No ack from edge node (timeout)'}
+    return {
+        'edge_delivered':  True,
+        'audio_queued':    reply.get('queued', True),
+        'critical_active': reply.get('critical_active', False),
+        'error':           '',
+    }
+
+
+def _acknowledge_on_edge_mqtt(mqtt_cfg: dict, zone_code: str, alert_id: int) -> bool:
+    if not zone_code or not mqtt_cfg.get('mqtt_broker_host'):
+        return False
+    request_id = uuid.uuid4().hex
+    payload = json.dumps({'request_id': request_id, 'alert_id': alert_id})
+    try:
+        reply = _mqtt_request_reply(mqtt_cfg, ack_topic(zone_code), payload, request_id)
+    except Exception as exc:
+        log.error(f"[MQTT] acknowledge failed: {exc}")
+        return False
+    return bool(reply and reply.get('acknowledged'))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Edge node delivery  (SYNCHRONOUS — blocks until edge responds)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def deliver_to_edge(mp3: bytes, device_ip: str, alert_id: int,
-                    alert_category: str, lang_code: str, zone_code: str = '',
-                    behavior: Optional[dict] = None) -> dict:
+                    alert_category: str, lang_code: str, text, zone_code: str = '',
+                    behavior: Optional[dict] = None, mqtt_cfg: Optional[dict] = None) -> dict:
     """
-    POST audio to edge node /play synchronously.
-    zone_code is unused here (HTTP addresses by device_ip) — accepted so
-    tts_server_mqtt.py can override this function with the same call
-    signature and address by zone_code (MQTT topic) instead.
+    Deliver audio to the edge node synchronously — HTTP POST /play (default)
+    or, when mqtt_cfg says protocol="mqtt", publish over that target's
+    configured MQTT broker instead (see _deliver_to_edge_mqtt above).
     Returns receipt dict:
-      edge_delivered : bool  — HTTP 200 received
+      edge_delivered : bool  — HTTP 200 / MQTT ack received
       audio_queued   : bool  — edge node confirmed it queued the audio
       critical_active: bool  — edge node has critical alerts active
       error          : str   — error message if failed
     """
+    if mqtt_cfg and mqtt_cfg.get('protocol') == 'mqtt':
+        return _deliver_to_edge_mqtt(mp3, mqtt_cfg, alert_id, alert_category, lang_code, text, zone_code, behavior)
+
     url = f"http://{device_ip}:{EDGE_NODE_PORT}{EDGE_NODE_PLAY}"
     log.info(f"[Edge] POST {url}  alert={alert_id}  cat={alert_category}")
     t0 = time.monotonic()
-    form = {'alert_id': str(alert_id), 'alert_category': alert_category, 'lang_code': lang_code}
+    form = {'alert_id': str(alert_id), 'alert_category': alert_category, 'lang_code': lang_code,
+            'text': text, 'zone_code': zone_code}
     for k, v in (behavior or {}).items():
         form[k] = '' if v is None else str(v)
     try:
@@ -600,9 +723,12 @@ def deliver_to_edge(mp3: bytes, device_ip: str, alert_id: int,
                 'critical_active': False, 'error': str(exc)}
 
 
-def acknowledge_on_edge(device_ip: str, alert_id: int, zone_code: str = '') -> bool:
-    """POST /acknowledge to edge node. Returns True on success.
-    zone_code unused here — see deliver_to_edge()'s docstring."""
+def acknowledge_on_edge(device_ip: str, alert_id: int, zone_code: str = '',
+                        mqtt_cfg: Optional[dict] = None) -> bool:
+    """POST /acknowledge to edge node, or publish over MQTT when mqtt_cfg
+    says protocol="mqtt" — see deliver_to_edge()'s docstring."""
+    if mqtt_cfg and mqtt_cfg.get('protocol') == 'mqtt':
+        return _acknowledge_on_edge_mqtt(mqtt_cfg, zone_code, alert_id)
     url = f"http://{device_ip}:{EDGE_NODE_PORT}{EDGE_NODE_ACKNOWLEDGE}"
     try:
         resp = requests.post(url, json={'alert_id': alert_id}, timeout=8)
@@ -674,7 +800,8 @@ def synthesise(text: str, lang_code: str,
                alert_id: int = 0, zone_code: str = '',
                alert_category: str = 'Normal',
                device_ip: str = '',
-               behavior: Optional[dict] = None) -> dict:
+               behavior: Optional[dict] = None,
+               mqtt_cfg: Optional[dict] = None) -> dict:
     """
     Full pipeline. Returns receipt dict:
       mp3            : bytes
@@ -733,8 +860,8 @@ def synthesise(text: str, lang_code: str,
     # 5. Deliver to edge node (SYNCHRONOUS)
     receipt = {'edge_delivered': False, 'audio_queued': False, 'critical_active': False}
     if device_ip or zone_code:
-        receipt = deliver_to_edge(mp3, device_ip, alert_id, alert_category, lang_code,
-                                  zone_code=zone_code, behavior=behavior)
+        receipt = deliver_to_edge(mp3, device_ip, alert_id, alert_category, lang_code, text=text,
+                                  zone_code=zone_code, behavior=behavior, mqtt_cfg=mqtt_cfg)
     else:
         log.info(f"[Synth] No device_ip/zone_code — skipping edge delivery for alert={alert_id}")
 
@@ -853,13 +980,22 @@ def synthesise_endpoint():
     else:
         behavior = resolve_alert_type_behavior(alert_category)
 
+    # Per-target transport: dispatch_service.py resolves the target device's
+    # protocol from its own DB and sends it flat in the body (same pattern as
+    # behavior above) — default 'http' means "nothing changes" for callers
+    # that don't know about this at all (e.g. alert_poller.py).
+    mqtt_cfg = {'protocol': body.get('protocol') or 'http'}
+    if mqtt_cfg['protocol'] == 'mqtt':
+        for k in ('mqtt_broker_host', 'mqtt_broker_port', 'mqtt_username', 'mqtt_password', 'mqtt_client_id'):
+            mqtt_cfg[k] = body.get(k)
+
     log.info(f"[API] /synthesise  lang={lang_code}  alert={alert_id}  "
              f"cat={alert_category}  device={device_ip or 'none'}  "
              f"\"{text[:50]}\"")
 
     try:
         result = synthesise(text, lang_code, nt_words, alert_id,
-                            zone_code, alert_category, device_ip, behavior)
+                            zone_code, alert_category, device_ip, behavior, mqtt_cfg)
     except Exception as exc:
         log.error(f"[API] Error: {exc}", exc_info=True)
         return jsonify({'error': str(exc)}),500
@@ -890,8 +1026,11 @@ def note_acknowledge():
 
     POST body: {"alert_id": 42, "device_ip": "10.42.0.50", "zone_code": "z002"}
     device_ip and zone_code are both accepted since alert_poller always sends
-    both — the HTTP version addresses by device_ip, the MQTT variant
-    (tts_server_mqtt.py) overrides acknowledge_on_edge to use zone_code instead.
+    both — the HTTP path addresses by device_ip, an MQTT-configured target
+    addresses by zone_code instead (see acknowledge_on_edge's mqtt_cfg branch).
+    NOTE: alert_poller.py doesn't yet resolve per-device protocol/mqtt_cfg
+    itself, so acknowledges routed through here are HTTP-only for now — a
+    known limitation, not something this route can fix on its own.
     """
     body      = request.get_json(force=True, silent=True) or {}
     alert_id  = int(body.get('alert_id', 0))
@@ -976,3 +1115,6 @@ if __name__ == '__main__':
     log.info(f"    TOTAL : {total.get('count',0)} files  {total.get('size_kb',0)}KB")
     log.info("="*60)
     app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
+
+
+

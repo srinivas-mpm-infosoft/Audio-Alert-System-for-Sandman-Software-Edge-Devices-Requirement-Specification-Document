@@ -18,6 +18,7 @@ sessions are not safe to share across threads.
 """
 
 import io
+import json
 import logging
 import os
 import time
@@ -31,6 +32,7 @@ import pymysql.cursors
 import requests
 
 import events_bus
+import mqtt_transport
 
 log = logging.getLogger("configuration_ui")
 
@@ -117,14 +119,37 @@ def _connect():
 # Zone / device resolution
 # ============================================================
 
+def _device_transport(row: Optional[dict]) -> dict:
+    """Extract protocol + MQTT broker config from a devices.metadata JSON
+    blob. Defaults to 'http' — every device that predates per-device
+    protocol selection keeps working over HTTP unchanged."""
+    if not row:
+        return {"protocol": "http"}
+    meta = row.get("metadata")
+    if isinstance(meta, str):
+        try: meta = json.loads(meta)
+        except Exception: meta = {}
+    meta = meta or {}
+    return {
+        "protocol":         meta.get("protocol") or "http",
+        "mqtt_broker_host": meta.get("mqtt_broker_host"),
+        "mqtt_broker_port": meta.get("mqtt_broker_port"),
+        "mqtt_username":    meta.get("mqtt_username"),
+        "mqtt_password":    meta.get("mqtt_password"),
+        "mqtt_client_id":   meta.get("mqtt_client_id"),
+    }
+
+
 def resolve_targets(zone_codes: list) -> list:
     """
-    zone_codes -> [{zone_code, zone_name, device_ip, default_language}, ...]
-    for zones that have a reachable device configured. Mirrors
-    alert_poller.get_gateway_ip's 'Edge Node/Gateway device_type first, else
-    any dotted-IP address' fallback. default_language lets callers leave
-    language unspecified and have each zone play in its own configured
-    language (see _dispatch_one).
+    zone_codes -> [{zone_code, zone_name, device_ip, default_language,
+    protocol, mqtt_broker_host, ...}, ...] for zones that have a device
+    configured. Mirrors alert_poller.get_gateway_ip's 'Edge Node/Gateway
+    device_type first, else any dotted-IP address' fallback. default_language
+    lets callers leave language unspecified and have each zone play in its
+    own configured language (see _dispatch_one). device_ip is only present
+    for HTTP-protocol devices — MQTT devices are addressed by zone_code/topic
+    instead, so device_ip stays None for them (never a stale/wrong IP).
     """
     if not zone_codes:
         return []
@@ -139,22 +164,24 @@ def resolve_targets(zone_codes: list) -> list:
             zones = c.fetchall()
             for z in zones:
                 c.execute(
-                    "SELECT address FROM devices WHERE zone_id=%s AND device_type IN ('Edge Node','Gateway') "
+                    "SELECT address, metadata FROM devices WHERE zone_id=%s AND device_type IN ('Edge Node','Gateway') "
                     "ORDER BY id LIMIT 1", (z["id"],),
                 )
                 row = c.fetchone()
                 if not row:
                     c.execute(
-                        "SELECT address FROM devices WHERE zone_id=%s "
+                        "SELECT address, metadata FROM devices WHERE zone_id=%s "
                         "AND address REGEXP '^[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+' "
                         "ORDER BY id LIMIT 1", (z["id"],),
                     )
                     row = c.fetchone()
+                transport = _device_transport(row)
                 out.append({
                     "zone_code": z["zone_code"],
                     "zone_name": z["name"],
-                    "device_ip": row["address"] if row else None,
+                    "device_ip": (row["address"] if row else None) if transport["protocol"] == "http" else None,
                     "default_language": z.get("default_language") or "EN",
+                    **transport,
                 })
     except Exception as e:
         log.error("[Dispatch] resolve_targets failed: %s", e)
@@ -261,14 +288,20 @@ def _insert_log(row: dict):
 # NOTE: conceptually mirrors edge-services/alert_poller.py's call_synthesise() — not shared code, keep in sync manually if either changes.
 def call_synthesise(text: str, lang_code: str, alert_id: int, zone_code: str,
                     alert_category: str, device_ip: str, alert_source: str = "",
-                    behavior: Optional[dict] = None) -> dict:
-    """POST to tts_server /synthesise. Synchronous — translate+TTS+deliver."""
+                    behavior: Optional[dict] = None, mqtt_cfg: Optional[dict] = None) -> dict:
+    """POST to tts_server /synthesise. Synchronous — translate+TTS+deliver.
+
+    tts_server.py does the actual edge delivery (HTTP POST or MQTT publish),
+    so for an MQTT-configured target its broker config rides along in this
+    same JSON payload (mqtt_cfg's protocol/mqtt_* keys) — tts_server.py's own
+    deliver_to_edge() reads them back out and branches transport there.
+    """
     url = f"{TTS_SERVER_URL.rstrip('/')}/synthesise"
     payload = {
         "text": text, "lang_code": lang_code, "alert_id": alert_id,
         "zone_code": zone_code, "alert_category": alert_category,
         "device_ip": device_ip, "alert_source": alert_source,
-        **(behavior or {}),
+        **(behavior or {}), **(mqtt_cfg or {}),
     }
     t0 = time.monotonic()
     try:
@@ -291,12 +324,20 @@ def call_synthesise(text: str, lang_code: str, alert_id: int, zone_code: str,
 
 
 def deliver_clip(file_path: str, device_ip: str, alert_id: int,
-                 alert_category: str, lang_code: str, behavior: Optional[dict] = None) -> dict:
-    """POST a pre-recorded clip file directly to edge_node /play (no TTS needed)."""
+                 alert_category: str, lang_code: str, behavior: Optional[dict] = None,
+                 zone_code: Optional[str] = None, mqtt_cfg: Optional[dict] = None) -> dict:
+    """Deliver a pre-recorded clip file to the edge node — no TTS needed.
+    HTTP (default): POST the file directly to edge_node /play.
+    MQTT (mqtt_cfg["protocol"] == "mqtt"): publish over the target's
+    configured broker instead, addressed by zone_code rather than device_ip."""
     p = Path(file_path)
     if not p.exists():
         return {"ok": False, "edge_delivered": False, "audio_queued": False,
                 "error": f"Clip file not found: {file_path}"}
+    if mqtt_cfg and mqtt_cfg.get("protocol") == "mqtt":
+        mp3 = p.read_bytes()
+        return mqtt_transport.publish_play(mqtt_cfg, zone_code, alert_id, alert_category,
+                                           lang_code, "", mp3, behavior=behavior)
     url = f"http://{device_ip}:{EDGE_NODE_PORT}/play"
     form = {"alert_id": str(alert_id), "alert_category": alert_category, "lang_code": lang_code}
     for k, v in (behavior or {}).items():
@@ -320,8 +361,17 @@ def deliver_clip(file_path: str, device_ip: str, alert_id: int,
         return {"ok": False, "edge_delivered": False, "audio_queued": False, "error": str(exc)}
 
 
-def acknowledge_on_edge(device_ip: str, alert_id: int) -> bool:
-    """Tell an edge node to stop/clear a queued item (e.g. dashboard ack of a broadcast)."""
+def acknowledge_on_edge(device_ip: str, alert_id: int, zone_code: Optional[str] = None) -> bool:
+    """Tell an edge node to stop/clear a queued item (e.g. dashboard ack of a
+    broadcast). device_ip is blank for an MQTT-configured device — pass
+    zone_code so its MQTT config can be resolved and the ack published there."""
+    if not device_ip:
+        if not zone_code:
+            return False
+        target = resolve_target(zone_code)
+        if not target or target.get("protocol") != "mqtt":
+            return False
+        return mqtt_transport.publish_acknowledge(target, zone_code, alert_id)
     try:
         resp = requests.post(f"http://{device_ip}:{EDGE_NODE_PORT}/acknowledge",
                              json={"alert_id": alert_id}, timeout=8)
@@ -366,7 +416,8 @@ def send_test_tone(zone_code: str) -> dict:
     produces a broken "http://:5000/play" URL downstream.
     """
     target = resolve_target(zone_code)
-    if not target or not target.get("device_ip"):
+    is_mqtt = target and target.get("protocol") == "mqtt"
+    if not target or not (target.get("device_ip") or (is_mqtt and target.get("mqtt_broker_host"))):
         log.error("[Dispatch] send_test_tone: no device configured for zone_code=%s", zone_code)
         return {"ok": False, "edge_delivered": False, "audio_queued": False,
                 "error": f"No device configured for zone '{zone_code}'"}
@@ -374,7 +425,8 @@ def send_test_tone(zone_code: str) -> dict:
     test_id = BROADCAST_ID_BASE + int(time.time() * 1000) % 90_000_000
     return call_synthesise(
         "This is a test announcement from the audio alert system.",
-        "EN", test_id, zone_code, "Low", target["device_ip"], alert_source="Test Fire",
+        "EN", test_id, zone_code, "Low", target.get("device_ip"), alert_source="Test Fire",
+        mqtt_cfg=target if is_mqtt else None,
     )
 
 
@@ -399,17 +451,20 @@ def _dispatch_one(target: dict, *, text, clip_path, language, alert_category,
         behavior["initial_play_count"] = play_count_override
     if requires_ack_override is not None:
         behavior["requires_ack"] = requires_ack_override
+    is_mqtt = target.get("protocol") == "mqtt"
+    mqtt_cfg = target if is_mqtt else None
     receipt = {"zone_code": zone_code, "zone_name": target.get("zone_name"),
               "device_ip": device_ip, "alert_id": alert_id}
 
-    if not device_ip:
+    if not device_ip and not (is_mqtt and target.get("mqtt_broker_host")):
         receipt.update(ok=False, edge_delivered=False, error="No device configured for zone")
     elif clip_path:
-        r = deliver_clip(clip_path, device_ip, alert_id, alert_category, lang, behavior=behavior)
+        r = deliver_clip(clip_path, device_ip, alert_id, alert_category, lang, behavior=behavior,
+                         zone_code=zone_code, mqtt_cfg=mqtt_cfg)
         receipt.update(r)
     else:
         r = call_synthesise(text, lang, alert_id, zone_code, alert_category,
-                            device_ip, alert_source, behavior=behavior)
+                            device_ip, alert_source, behavior=behavior, mqtt_cfg=mqtt_cfg)
         receipt.update(r)
 
     _insert_log({

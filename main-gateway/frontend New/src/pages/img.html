@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Modbus RTU UI Mockup</title>
+  <style>
+    :root { font-family: Inter, system-ui, sans-serif; background: #ecf1f8; color:#1f2937; }
+    body { margin: 0; padding: 20px; background: #edf2f7; }
+    .mock-app { max-width: 1100px; margin: 0 auto; background: #fff; border: 1px solid #dbe3ea; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.05); overflow: hidden; }
+    .header { padding: 16px 20px; border-bottom: 1px solid #e2e8f0; display:flex; justify-content:space-between; align-items:center; background:#f7fafc; }
+    .header h1 { margin:0; font-size: 1rem; letter-spacing:.4px; color:#111827; }
+    .header .tag { border:1px solid #dbe3ea; background:#f9fbff; font-size:.7rem; border-radius: 999px; padding:.2rem .6rem; color:#334155; }
+    .tabs { border-bottom:1px solid #e2e8f0; background:#fff; display:flex; gap:6px; padding:10px; }
+    .tab-btn { border:1px solid #cbd5e1; border-radius: 8px; background:#fff; color:#334155; font-weight:600; padding:.45rem .85rem; cursor:pointer; }
+    .tab-btn.active { background:#1d4ed8; color:#fff; border-color:#1d4ed8; }
+    .panel { padding: 14px 20px; }
+    .panel-header { font-size: .9rem; text-transform: uppercase; color:#64748b; letter-spacing:.1rem; font-weight:700; margin-bottom:10px; }
+    .grid-2 { display:grid; grid-template-columns: 260px 1fr; gap:12px; }
+    .card { background:#fff; border:1px solid #e2e8f0; border-radius:8px; padding:12px; box-shadow:0 2px 6px rgba(0,0,0,.03); }
+    .card h3 { margin:0 0 .5rem; font-size:.92rem; color:#111827; }
+    .pill-row, .slave-row { display:flex; gap:6px; flex-wrap:wrap; }
+    .pill { border:1px solid #cbd5e1; background:#f8fafc; border-radius:999px; padding:.18rem .5rem; font-size:.75rem; color:#334155; cursor:pointer; }
+    .pill.active { border-color:#2563eb; background:#eff6ff; color:#1d4ed8; }
+    .toolbar { margin:10px 0; display:flex; gap:6px; align-items:center; }
+    .button, .button-primary { border:none; border-radius:6px; padding:.4rem .75rem; cursor:pointer; font-size:.78rem; font-weight:600; }
+    .button { background:#f1f5f9; color:#334155; border:1px solid #cbd5e1; }
+    .button-primary { background:#1d4ed8; color:#fff; }
+    .form-grid { display:grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap:8px; margin-top:8px; }
+    .field { display:flex; flex-direction:column; gap:3px; font-size:.75rem; color:#334155; }
+    .field input, .field select { border:1px solid #cbd5e1; border-radius:5px; padding:6px 8px; font-size:.82rem; }
+    .db-settings { margin-top:8px; border:1px solid #e2e8f0; border-radius:6px; padding:8px; background:#f9fafb; }
+    .table-wrapper { overflow-x:auto; margin-top:8px; }
+    table { width:100%; border-collapse:collapse; font-size:.8rem; }
+    th, td { border:1px solid #e2e8f0; padding:6px; text-align:left; }
+    th { background:#f8fafc; font-weight:600; }
+    .empty { color:#64748b; font-size:.85rem; margin-top:8px; }
+  </style>
+</head>
+<body>
+  <div class="mock-app">
+    <div class="header">
+      <div>
+        <div style="font-size:1rem; font-weight:700; color:#0f172a;">Modbus RTU</div>
+        <div style="font-size:.8rem; color:#475569;">Device / Slave / Register manager</div>
+      </div>
+      <span class="tag">Flow Diagram</span>
+    </div>
+
+    <div class="tabs">
+      <button class="tab-btn active">Devices</button>
+      <button class="tab-btn">Settings</button>
+      <button class="tab-btn">Transmitter</button>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">Devices</div>
+      <div class="toolbar">
+        <button class="button">+ Add Device</button>
+        <button class="button">+ Add Slave</button>
+        <button class="button-primary">Save</button>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <h3>Brand Devices</h3>
+          <div class="pill-row">
+            <span class="pill active">Schneider EM6436H</span>
+            <span class="pill">Delta DVP</span>
+            <span class="pill">Siemens S7</span>
+          </div>
+          <div class="pill-row" style="margin-top:8px;">
+            <span class="pill">OpenLoop</span>
+            <span class="pill">Pump Drive</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <h3 style="margin:.1rem 0;">Slave 1</h3>
+            <button class="button">Remove Slave</button>
+          </div>
+          <div class="form-grid">
+            <div class="field"><label>RS485 Port</label><input value="/dev/ttyAMA5" readonly></div>
+            <div class="field"><label>Baud Rate</label><select><option>9600</option><option>19200</option></select></div>
+            <div class="field"><label>Parity</label><select><option>Even</option><option>Odd</option></select></div>
+            <div class="field"><label>Data Bits</label><select><option>8</option><option>7</option></select></div>
+          </div>
+
+          <div class="db-settings">
+            <div style="font-weight:600; margin-bottom:4px;">Database Settings</div>
+            <div class="toolbar">
+              <label><input type="checkbox" checked> Upload Local</label>
+              <label><input type="checkbox"> Upload Cloud</label>
+            </div>
+            <div class="form-grid">
+              <div class="field"><label>DB Name</label><input value="ifex_demo" readonly></div>
+              <div class="field"><label>Table Name</label><input value="modbus_rtu" readonly></div>
+            </div>
+          </div>
+
+          <div style="margin-top:10px; font-weight:600;">Registers</div>
+          <div class="toolbar">
+            <button class="button">+ Add Row</button>
+            <button class="button">Load Preset</button>
+          </div>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr><th>#</th><th>Name</th><th>Start</th><th>Type</th><th>Enabled</th><th>Action</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>1</td><td>Temperature</td><td>40001</td><td>Input Register</td><td><input type="checkbox" checked></td><td><button class="button">×</button></td></tr>
+                <tr><td>2</td><td>Pressure</td><td>40002</td><td>Input Register</td><td><input type="checkbox"></td><td><button class="button">×</button></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

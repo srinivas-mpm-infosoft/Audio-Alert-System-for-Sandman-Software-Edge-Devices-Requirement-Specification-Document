@@ -18,6 +18,9 @@ websocket-client
 flask-sock
 simple-websocket
 
-# edge_node.py — optional MQTT heartbeat publish (set MQTT_ZONE_ID env var
-# to this node's zone_code to enable; degrades gracefully without it)
+# edge_node.py — optional MQTT heartbeat publish AND MQTT alert/audio
+# receiving (set MQTT_ZONE_ID + MQTT_BROKER_HOST env vars to enable; degrades
+# gracefully without it — HTTP /play keeps working either way).
+# tts_server.py — needed only if any Device is configured with protocol="mqtt"
+# in the Central Gateway (Devices & Zones); unused (never imported) otherwise.
 paho-mqtt

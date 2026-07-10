@@ -54,6 +54,8 @@ from flask import Flask, request, jsonify
 from flask_sock import Sock
 from simple_websocket import ConnectionClosed
 
+from mqtt_audio_protocol import ack_ack_topic, ack_topic, play_ack_topic, play_topic, unpack_play
+
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════════════
@@ -71,7 +73,16 @@ HIGH_REPEAT_SEC = 20.0   # seconds between High alert replays
 MQTT_BROKER_HOST         = os.environ.get('MQTT_BROKER_HOST', 'localhost')
 MQTT_BROKER_PORT         = int(os.environ.get('MQTT_BROKER_PORT', '1883'))
 MQTT_ZONE_ID             = os.environ.get('MQTT_ZONE_ID', '')
+MQTT_USERNAME            = os.environ.get('MQTT_USERNAME', '')
+MQTT_PASSWORD            = os.environ.get('MQTT_PASSWORD', '')
 MQTT_PUBLISH_INTERVAL_SEC = 15
+
+# MQTT alert/audio receiving (Section 7) — an alternative to the HTTP /play
+# route above, for edge nodes the Central Gateway is configured to reach over
+# MQTT instead of direct LAN HTTP. Reuses the same broker/zone env vars as
+# the heartbeat publisher above (same broker, same zone). Both HTTP /play and
+# this MQTT subscriber feed the exact same _enqueue_play() queue — whichever
+# transport the gateway's Device config picked for this node just works.
 
 # Local dashboard (D6) — reuses MQTT_ZONE_ID as this node's zone identity
 # (already required for MQTT heartbeat) and proxies SOP/alert lookups to
@@ -433,8 +444,8 @@ def _disable_ws_permessage_deflate():
 
 
 # Fallback behavior when a caller doesn't send resolved AlertTypeConfig
-# fields (e.g. edge_node_mqtt.py's MQTT play subscriber, which predates the
-# config-driven engine) — reproduces the original hardcoded rules exactly.
+# fields (e.g. an MQTT play message with no behavior header) — reproduces
+# the original hardcoded rules exactly.
 _LEGACY_BEHAVIOR = {
     'Critical': {'is_blocking': True,  'initial_play_count': None, 'requires_ack': True,
                  'repeat_interval_sec': 0.0, 'reduction_step_sec': 0.0, 'min_interval_sec': 0.0, 'sort_order': 0},
@@ -451,14 +462,18 @@ def _legacy_behavior_for_category(alert_category: str) -> dict:
 
 
 def _enqueue_play(alert_id: int, alert_category: str, lang_code: str, mp3_bytes: bytes,
-                  behavior: Optional[dict] = None) -> dict:
+                  behavior: Optional[dict] = None, text: str = '', zone_code: str = '',
+                  alert_source: str = '') -> dict:
     """
     Save audio to disk and enqueue for playback. Shared by the HTTP POST
-    /play route and edge_node_mqtt.py's MQTT play subscriber — both transports
-    end up in the exact same queue. `behavior` is the resolved AlertTypeConfig
-    fields (is_blocking/initial_play_count/repeat_interval_sec/reduction_step_sec/
-    min_interval_sec/requires_ack/sort_order); falls back to the legacy
-    Critical/High/Normal/Low rules if not supplied.
+    /play route and the MQTT play subscriber (_mqtt_audio_subscriber below) —
+    both transports end up in the exact same queue. `behavior` is the
+    resolved AlertTypeConfig fields (is_blocking/initial_play_count/
+    repeat_interval_sec/reduction_step_sec/min_interval_sec/requires_ack/
+    sort_order); falls back to the legacy Critical/High/Normal/Low rules if
+    not supplied. `text`/`zone_code`/`alert_source` are display-only (feed
+    the /display Edge Node dashboard's Pattern Name/Component Name cards) —
+    optional, default '' when a caller doesn't have them.
     """
     if not mp3_bytes:
         return {'queued': False, 'reason': 'empty audio'}
@@ -478,6 +493,9 @@ def _enqueue_play(alert_id: int, alert_category: str, lang_code: str, mp3_bytes:
     item = {
         'alert_id':        alert_id,
         'alert_category':  alert_category,
+        'text':            text or '',
+        'zone_code':       zone_code or '',
+        'alert_source':    alert_source or '',
         'is_blocking':     bool(b.get('is_blocking', False)),
         'sort_order':      b.get('sort_order') if b.get('sort_order') is not None else 100,
         'audio_path':      audio_path,
@@ -518,7 +536,7 @@ def _enqueue_play(alert_id: int, alert_category: str, lang_code: str, mp3_bytes:
 
 def _do_acknowledge(alert_id: int) -> dict:
     """Remove alert from queue and delete its audio file. Shared by the
-    HTTP POST /acknowledge route and edge_node_mqtt.py's MQTT subscriber."""
+    HTTP POST /acknowledge route and the MQTT subscriber below."""
     audio_path = None
     removed    = False
     with _queue_lock:
@@ -542,6 +560,76 @@ def _do_acknowledge(alert_id: int) -> dict:
         'alert_id':       alert_id,
         'critical_active': bool(_unacked_blocking()),
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MQTT play/acknowledge subscriber (Section 7 — alternative to HTTP /play)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_BEHAVIOR_KEYS = ('is_blocking', 'initial_play_count', 'repeat_interval_sec',
+                  'reduction_step_sec', 'min_interval_sec', 'requires_ack', 'sort_order')
+
+
+def _mqtt_on_message(client, userdata, msg):
+    try:
+        if msg.topic == play_topic(MQTT_ZONE_ID):
+            header, mp3_bytes = unpack_play(msg.payload)
+            behavior = {k: header[k] for k in _BEHAVIOR_KEYS if k in header} or None
+            result = _enqueue_play(
+                int(header.get('alert_id', 0)), header.get('alert_category', 'Normal'),
+                header.get('lang_code', 'EN'), mp3_bytes, behavior,
+                text=header.get('text', ''), zone_code=MQTT_ZONE_ID,
+                alert_source=header.get('alert_source', ''),
+            )
+            reply = {'request_id': header.get('request_id'), 'alert_id': header.get('alert_id'),
+                     'queued': result.get('queued', False), 'critical_active': result.get('critical_active', False)}
+            client.publish(play_ack_topic(MQTT_ZONE_ID), json.dumps(reply), qos=1)
+
+        elif msg.topic == ack_topic(MQTT_ZONE_ID):
+            body = json.loads(msg.payload.decode('utf-8'))
+            result = _do_acknowledge(int(body.get('alert_id', 0)))
+            reply = {'request_id': body.get('request_id'), 'acknowledged': result['acknowledged']}
+            client.publish(ack_ack_topic(MQTT_ZONE_ID), json.dumps(reply), qos=1)
+    except Exception as e:
+        log.error(f"[MQTT-Audio] Failed handling {msg.topic}: {e}")
+
+
+def _mqtt_audio_subscriber():
+    try:
+        import paho.mqtt.client as mqtt
+    except ImportError:
+        log.warning("[MQTT-Audio] paho-mqtt not installed — MQTT play/acknowledge disabled "
+                   "(HTTP /play and /acknowledge still work)")
+        return
+    if not MQTT_ZONE_ID:
+        log.warning("[MQTT-Audio] MQTT_ZONE_ID not set — MQTT play/acknowledge disabled")
+        return
+
+    try:
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f'edge-audio-{MQTT_ZONE_ID}')
+    except AttributeError:
+        client = mqtt.Client(client_id=f'edge-audio-{MQTT_ZONE_ID}')
+    if MQTT_USERNAME:
+        client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+    client.on_message = _mqtt_on_message
+    client.reconnect_delay_set(min_delay=1, max_delay=30)
+    try:
+        client.connect(MQTT_BROKER_HOST, MQTT_BROKER_PORT, keepalive=30)
+    except Exception as e:
+        log.warning(f"[MQTT-Audio] Could not connect to broker: {e}")
+        return
+
+    client.subscribe(play_topic(MQTT_ZONE_ID), qos=1)
+    client.subscribe(ack_topic(MQTT_ZONE_ID), qos=1)
+    log.info(f"[MQTT-Audio] Subscribed: {play_topic(MQTT_ZONE_ID)}  {ack_topic(MQTT_ZONE_ID)}")
+    client.loop_forever()
+
+
+# _mqtt_audio_subscriber runs client.loop_forever() (blocking), unlike the
+# heartbeat publisher's loop_start()+sleep loop — needs its own dedicated
+# thread, started here (after its def, same convention as the other two
+# thread-starts further up) rather than grouped with them.
+threading.Thread(target=_mqtt_audio_subscriber, daemon=True, name='mqtt-audio').start()
 
 
 def _form_bool(v) -> bool:
@@ -581,6 +669,9 @@ def play():
     alert_id       = int(request.form.get('alert_id', 0))
     alert_category = request.form.get('alert_category', 'Normal').strip()
     lang_code      = request.form.get('lang_code', 'EN').strip()
+    text           = request.form.get('text', '').strip()
+    zone_code      = request.form.get('zone_code', '').strip()
+    alert_source   = request.form.get('alert_source', '').strip()
 
     if not mp3_bytes:
         return jsonify({'error': 'empty audio'}), 400
@@ -597,7 +688,8 @@ def play():
             'sort_order':          _form_int_or_none(request.form.get('sort_order')),
         }
 
-    return jsonify(_enqueue_play(alert_id, alert_category, lang_code, mp3_bytes, behavior))
+    return jsonify(_enqueue_play(alert_id, alert_category, lang_code, mp3_bytes, behavior,
+                                 text=text, zone_code=zone_code, alert_source=alert_source))
 
 
 @app.route('/acknowledge', methods=['POST'])
@@ -666,6 +758,37 @@ def queue_status():
         'critical_active':  bool(_unacked_blocking()),
         'currently_playing': _playing[0],
         'items':            items,
+    })
+
+
+@app.route('/display-data', methods=['GET'])
+def display_data():
+    """
+    Data feed for the simplified /display Edge Node UI (Section 3) — Pattern
+    Name / Component Name / Process Parameters for whatever is currently
+    playing. Reads straight off this node's own in-memory queue (no gateway
+    round-trip needed — the alert's own metadata already arrived with it),
+    so this keeps working even if the Central Gateway is briefly unreachable.
+    """
+    current_id = _playing[0]
+    item = None
+    if current_id is not None:
+        with _queue_lock:
+            item = next((i for i in _queue if i['alert_id'] == current_id), None)
+    if not item:
+        return jsonify({'active': False, 'pattern_name': None, 'component_name': None,
+                        'text': None, 'process_parameters': None, 'ts': time.time()})
+    return jsonify({
+        'active':             True,
+        'pattern_name':       item.get('alert_source') or item.get('alert_category') or 'Alert',
+        'component_name':     item.get('zone_code') or None,
+        'text':               item.get('text') or None,
+        # Not currently threaded through any dispatch path to this node (no
+        # source_parameter/trigger_value/threshold data reaches /play today)
+        # — reserved so a future caller can populate it without another
+        # contract change; None here is a genuine "not available", not a bug.
+        'process_parameters': None,
+        'ts': time.time(),
     })
 
 
@@ -954,7 +1077,6 @@ _DASHBOARD_HTML = """<!doctype html>
 </head>
 <body>
   <h1>Edge Node Dashboard</h1>
-  <div class="zone">Zone: <strong id="zoneId">%(zone_id)s</strong> &middot; Gateway: <span id="gwStatus" class="pill idle">checking…</span></div>
 
   <div class="card">
     <h2>Currently Playing</h2>
@@ -1282,6 +1404,138 @@ def dashboard():
         'zone_id': ZONE_ID or '(not configured)',
         'zone_id_json': json.dumps(ZONE_ID),
         'gateway_url_json': json.dumps(GATEWAY_URL),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Edge Node Display UI (Section 3) — simple information display, visually
+# separate from the operator /dashboard above. White background, large
+# high-contrast text, no controls/settings — meant for a screen mounted next
+# to the speaker running continuously on a factory floor.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_DISPLAY_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Audio Alert Display</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: #ffffff; color: #0f172a; margin: 0;
+    min-height: 100vh; display: flex; flex-direction: column;
+  }
+  nav {
+    display: flex; align-items: center; gap: 14px;
+    padding: 20px 32px; border-bottom: 2px solid #e2e8f0;
+  }
+  nav .logo {
+    width: 40px; height: 40px; border-radius: 8px; flex-shrink: 0;
+    background: #1d4ed8; color: #fff; display: flex; align-items: center;
+    justify-content: center; font-weight: 800; font-size: 18px;
+  }
+  nav .title { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
+  nav .zone { margin-left: auto; font-size: 15px; color: #64748b; font-weight: 600; }
+  main { flex: 1; display: flex; flex-direction: column; gap: 28px; padding: 40px 48px; }
+  .idle-banner {
+    display: none; text-align: center; font-size: 28px; font-weight: 700;
+    color: #94a3b8; margin-top: 10vh;
+  }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 28px; }
+  .card {
+    border: 2px solid #e2e8f0; border-radius: 16px; padding: 28px 32px;
+    background: #f8fafc;
+  }
+  .card .label {
+    font-size: 15px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.08em; color: #64748b; margin-bottom: 10px;
+  }
+  .card .value { font-size: 40px; font-weight: 800; line-height: 1.15; color: #0f172a; word-break: break-word; }
+  .card .value.empty { color: #cbd5e1; font-weight: 600; font-size: 28px; }
+  .message-card { border-color: #1d4ed8; background: #eff6ff; }
+  .message-card .value { font-size: 28px; font-weight: 600; color: #1e3a8a; }
+  .conn-pill {
+    position: fixed; bottom: 18px; right: 22px; font-size: 13px; font-weight: 600;
+    padding: 6px 14px; border-radius: 999px; background: #f1f5f9; color: #64748b;
+  }
+  .conn-pill.bad { background: #fef2f2; color: #dc2626; }
+</style>
+</head>
+<body>
+  <nav>
+    <div class="logo">SA</div>
+    <div class="title">SandMan Audio Alert System</div>
+    <div class="zone">%(zone_label)s</div>
+  </nav>
+  <main>
+    <div class="idle-banner" id="idleBanner">No active announcement</div>
+    <div class="cards" id="cards" style="display:none">
+      <div class="card">
+        <div class="label">Pattern Name</div>
+        <div class="value" id="patternName">—</div>
+      </div>
+      <div class="card">
+        <div class="label">Component Name</div>
+        <div class="value" id="componentName">—</div>
+      </div>
+      <div class="card">
+        <div class="label">Process Parameters</div>
+        <div class="value" id="processParams">—</div>
+      </div>
+      <div class="card message-card" id="messageCard" style="display:none">
+        <div class="label">Announcement</div>
+        <div class="value" id="messageText"></div>
+      </div>
+    </div>
+  </main>
+  <div class="conn-pill" id="connPill">connecting…</div>
+<script>
+  const $ = id => document.getElementById(id);
+
+  function setValue(el, text) {
+    if (text) { el.textContent = text; el.classList.remove('empty'); }
+    else { el.textContent = 'Not available'; el.classList.add('empty'); }
+  }
+
+  async function refresh() {
+    try {
+      const res = await fetch('/display-data');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const d = await res.json();
+      $('connPill').textContent = 'connected';
+      $('connPill').classList.remove('bad');
+
+      if (!d.active) {
+        $('idleBanner').style.display = 'block';
+        $('cards').style.display = 'none';
+        return;
+      }
+      $('idleBanner').style.display = 'none';
+      $('cards').style.display = 'grid';
+      setValue($('patternName'), d.pattern_name);
+      setValue($('componentName'), d.component_name);
+      setValue($('processParams'), d.process_parameters);
+      if (d.text) { $('messageCard').style.display = 'block'; $('messageText').textContent = d.text; }
+      else { $('messageCard').style.display = 'none'; }
+    } catch (e) {
+      $('connPill').textContent = 'disconnected';
+      $('connPill').classList.add('bad');
+    }
+  }
+  refresh();
+  setInterval(refresh, 2000);
+</script>
+</body>
+</html>
+"""
+
+
+@app.route('/display', methods=['GET'])
+def display():
+    return _DISPLAY_HTML % {
+        'zone_label': ZONE_ID or 'Zone not configured',
     }
 
 

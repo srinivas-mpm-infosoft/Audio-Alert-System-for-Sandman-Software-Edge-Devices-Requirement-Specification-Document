@@ -525,8 +525,12 @@ class Device(db.Model):
             "metrics":       meta.get("metrics", {"cpu":0,"memory":0,"latency_ms":0,"audio_queue":0}),
             "health":            meta.get("health"),
             "health_updated_at": meta.get("health_updated_at"),
-            "protocol":      meta.get("protocol"),
-            "mqtt_topic":    meta.get("mqtt_topic"),
+            "protocol":         meta.get("protocol") or "http",
+            "mqtt_broker_host": meta.get("mqtt_broker_host"),
+            "mqtt_broker_port": meta.get("mqtt_broker_port"),
+            "mqtt_username":    meta.get("mqtt_username"),
+            "mqtt_password":    meta.get("mqtt_password"),
+            "mqtt_client_id":   meta.get("mqtt_client_id"),
             "audio_channel": meta.get("audio_channel"),
             "volume_override": meta.get("volume_override"),
             "plant":         zone_obj.plant_id if zone_obj else None,
@@ -534,6 +538,17 @@ class Device(db.Model):
             "now_playing":       now_playing,
             "playback_status":   playback_status,
         }
+
+
+
+# Device.device_metadata keys settable directly (without a wholesale "metadata"
+# replace) from the add/edit device UI — includes per-device transport config
+# (protocol=http|mqtt + the MQTT broker fields) alongside the pre-existing keys.
+_DEVICE_METADATA_KEYS = (
+    "uptime_pct", "downtime_min", "metrics", "protocol",
+    "mqtt_broker_host", "mqtt_broker_port", "mqtt_username", "mqtt_password",
+    "mqtt_client_id", "audio_channel", "volume_override",
+)
 
 
 def _alert_info(alert_id) -> dict:
@@ -554,13 +569,16 @@ def _alert_info(alert_id) -> dict:
         log.warning("_alert_info lookup failed for alert_id=%s: %s", alert_id, e)
         row = None
     if not row:
-        return {"type": "alert", "name": f"Alert #{alert_id}", "category": None,
+        return {"type": "alert", "name": "Alert", "category": None,
                 "zone_code": None, "alert_id": alert_id, "started_at": None}
+    category, zone_code = row["alert_category"], row["zone_code"]
+    # Never show the raw alert_id to the operator — fall back to category/zone, not a number.
+    fallback_name = " — ".join(p for p in (category, zone_code) if p) or "Alert"
     return {
         "type":       row["announcement_type"] or "alert",
-        "name":       row["alert_source"] or f"Alert #{alert_id}",
-        "category":   row["alert_category"],
-        "zone_code":  row["zone_code"],
+        "name":       row["alert_source"] or fallback_name,
+        "category":   category,
+        "zone_code":  zone_code,
         "alert_id":   alert_id,
         "started_at": row["alert_timestamp"].isoformat() if row["alert_timestamp"] else None,
     }
@@ -2402,11 +2420,11 @@ def aa_broadcast_ack(alert_id):
     if not _can("aa.alerts.ack"):
         return jsonify(ok=False, error="Permission denied"), 403
     row = db.session.execute(text(
-        "SELECT device_ip FROM alert_logs WHERE alert_id = :aid ORDER BY alert_timestamp DESC LIMIT 1"
+        "SELECT device_ip, zone_code FROM alert_logs WHERE alert_id = :aid ORDER BY alert_timestamp DESC LIMIT 1"
     ), {"aid": alert_id}).mappings().first()
-    if not row or not row["device_ip"]:
+    if not row or not (row["device_ip"] or row["zone_code"]):
         return jsonify(ok=False, error="Alert not found"), 404
-    if not dispatch_service.acknowledge_on_edge(row["device_ip"], alert_id):
+    if not dispatch_service.acknowledge_on_edge(row["device_ip"], alert_id, zone_code=row["zone_code"]):
         return jsonify(ok=False, error="Could not reach the edge node"), 502
     db.session.execute(text(
         "UPDATE alert_logs SET ack_time = :now WHERE alert_id = :aid"
@@ -4009,8 +4027,7 @@ def aa_devices_post():
         firmware       = data.get("firmware"),
         status         = data.get("status", "unknown"),
         device_metadata= data.get("metadata") or {
-            k: data[k] for k in ("uptime_pct","downtime_min","metrics","protocol",
-                                 "mqtt_topic","audio_channel","volume_override") if k in data
+            k: data[k] for k in _DEVICE_METADATA_KEYS if k in data
         },
     )
     db.session.add(device)
@@ -4042,8 +4059,12 @@ def aa_devices_put(dev_id):
     if "zone_id" in data:
         z = Zone.query.filter_by(zone_code=data["zone_id"]).first() if data["zone_id"] else None
         device.zone_id = z.id if z else None
-    if "metadata" in data:
-        device.device_metadata = data["metadata"]
+    # Merge (never wholesale-replace) so unrelated keys already in metadata —
+    # heartbeat_service's live "health" snapshot, audio_channel, etc. — survive
+    # an edit that only touches a few fields (e.g. switching protocol/mqtt config).
+    meta_updates = data.get("metadata") or {k: data[k] for k in _DEVICE_METADATA_KEYS if k in data}
+    if meta_updates:
+        device.device_metadata = {**(device.device_metadata or {}), **meta_updates}
     db.session.commit()
     return jsonify(ok=True, data=device.to_dict())
 

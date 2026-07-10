@@ -81,8 +81,8 @@ def _play_current_step(execution, sop, SopStepExecution, db, dispatch_broadcast,
     # /acknowledge for that exact alert_id (advancing the SOP step here only
     # updates this DB row; it doesn't by itself stop the edge node's replay).
     execution.current_receipts = [
-        {"device_ip": r["device_ip"], "alert_id": r["alert_id"]}
-        for r in receipts if r.get("device_ip") and r.get("alert_id")
+        {"device_ip": r.get("device_ip"), "zone_code": r.get("zone_code"), "alert_id": r["alert_id"]}
+        for r in receipts if r.get("alert_id") and (r.get("device_ip") or r.get("zone_code"))
     ]
     db.session.commit()
     return receipts
@@ -95,7 +95,7 @@ def _clear_current_receipts(execution, acknowledge_on_edge):
     queue self-clears or it's restarted."""
     for r in (execution.current_receipts or []):
         try:
-            acknowledge_on_edge(r["device_ip"], r["alert_id"])
+            acknowledge_on_edge(r.get("device_ip"), r["alert_id"], zone_code=r.get("zone_code"))
         except Exception as e:
             log.warning("[SOP] acknowledge_on_edge(%s, %s) failed: %s",
                        r.get("device_ip"), r.get("alert_id"), e)

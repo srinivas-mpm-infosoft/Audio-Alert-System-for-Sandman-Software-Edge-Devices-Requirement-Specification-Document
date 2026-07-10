@@ -1,8 +1,11 @@
 """
-mqtt_audio_protocol.py — shared wire format for the MQTT audio-delivery
-variant (tts_server_mqtt.py <-> edge_node_mqtt.py). The plain HTTP variant
-(tts_server.py / edge_node.py) doesn't use this at all — it just POSTs
-multipart forms directly.
+mqtt_audio_protocol.py — shared wire format for MQTT audio delivery, used by
+tts_server.py's _deliver_to_edge_mqtt()/_acknowledge_on_edge_mqtt() (gateway
+side, publish) and edge_node.py's _mqtt_audio_subscriber() (edge side,
+subscribe). Both files support HTTP and MQTT at the same time — which
+transport is used for a given alert is decided per target device (the
+Central Gateway's Device.protocol config), not by which file/process is
+running.
 
 Topics, one set per zone_code (e.g. "z002"):
   sandman/audio/<zone_code>/play              tts_server -> edge_node   (play command)

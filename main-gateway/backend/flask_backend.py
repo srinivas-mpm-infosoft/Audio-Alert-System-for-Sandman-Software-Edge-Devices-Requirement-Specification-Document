@@ -908,6 +908,11 @@ class AlertTypeConfig(db.Model):
     id                  = Column(Integer, primary_key=True)
     type_code           = Column(String(32), unique=True, nullable=False)
     label               = Column(String(64), nullable=False)
+    # "alert" = urgent, needs the operator's attention (Critical/High/etc.).
+    # "information" = routine, non-urgent announcements — same playback
+    # engine, just a different default posture (see the seeded "information"
+    # row below: not blocking, plays once, no ack required).
+    category            = Column(String(16), default="alert")
     is_builtin          = Column(Boolean, default=False)
     sort_order          = Column(Integer, default=100)
     is_blocking         = Column(Boolean, default=False)
@@ -924,6 +929,7 @@ class AlertTypeConfig(db.Model):
             "id":                  self.type_code,
             "db_id":               self.id,
             "label":               self.label,
+            "category":            self.category or "alert",
             "is_builtin":          bool(self.is_builtin),
             "sort_order":          self.sort_order,
             "is_blocking":         bool(self.is_blocking),
@@ -2932,6 +2938,11 @@ def aa_alert_types_get():
 
 def _apply_alert_type_fields(cfg, data):
     if "label" in data and data["label"]: cfg.label = data["label"]
+    if "category" in data:
+        category = data["category"]
+        if category not in ("alert", "information"):
+            raise ValueError("category must be 'alert' or 'information'")
+        cfg.category = category
     if "sort_order" in data: cfg.sort_order = int(data["sort_order"])
     if "is_blocking" in data: cfg.is_blocking = bool(data["is_blocking"])
     if "initial_play_count" in data:
@@ -5012,6 +5023,7 @@ def _run_migrations():
         "ALTER TABLE sop_steps ADD COLUMN IF NOT EXISTS type_code VARCHAR(32)",
         "ALTER TABLE sop_steps ADD COLUMN IF NOT EXISTS play_count_override INT",
         "ALTER TABLE sop_steps ADD COLUMN IF NOT EXISTS requires_ack_override TINYINT(1)",
+        "ALTER TABLE alert_type_configs ADD COLUMN IF NOT EXISTS category VARCHAR(16) DEFAULT 'alert'",
         # New tables created automatically by SQLAlchemy — no ALTER needed
         # but we add them here as safety guards:
         """CREATE TABLE IF NOT EXISTS zone_language_configs (
@@ -5102,6 +5114,7 @@ def _run_migrations():
             id                  INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
             type_code           VARCHAR(32) NOT NULL,
             label               VARCHAR(64) NOT NULL,
+            category            VARCHAR(16) DEFAULT 'alert',
             is_builtin          BOOLEAN DEFAULT FALSE,
             sort_order          INT DEFAULT 100,
             is_blocking         BOOLEAN DEFAULT FALSE,
@@ -5136,13 +5149,26 @@ def _run_migrations():
             ("low",      "Low",      3, False, 1,    60.0, 0.0, 60.0, False),
         ]:
             db.session.add(AlertTypeConfig(
-                type_code=type_code, label=label, is_builtin=True, sort_order=sort_order,
+                type_code=type_code, label=label, category="alert", is_builtin=True, sort_order=sort_order,
                 is_blocking=is_blocking, initial_play_count=play_count,
                 repeat_interval_sec=interval, reduction_step_sec=reduction,
                 min_interval_sec=min_interval, requires_ack=requires_ack,
             ))
         db.session.commit()
         log.info("Seeded 4 built-in alert types (critical/high/normal/low)")
+
+    # Seed one built-in "Information" type independently of the block above
+    # (so it also lands on databases that already had the 4 alert types
+    # seeded before this category distinction existed) — a routine, non-
+    # urgent announcement: not blocking, plays once, no acknowledgement.
+    if not AlertTypeConfig.query.filter_by(type_code="information").first():
+        db.session.add(AlertTypeConfig(
+            type_code="information", label="Information", category="information", is_builtin=True,
+            sort_order=4, is_blocking=False, initial_play_count=1,
+            repeat_interval_sec=60.0, reduction_step_sec=0.0, min_interval_sec=60.0, requires_ack=False,
+        ))
+        db.session.commit()
+        log.info("Seeded built-in 'Information' alert type")
 
 
 def _seed_users():

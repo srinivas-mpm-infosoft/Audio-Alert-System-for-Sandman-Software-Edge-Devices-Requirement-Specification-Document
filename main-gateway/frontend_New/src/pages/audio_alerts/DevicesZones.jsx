@@ -24,68 +24,6 @@ import { targetUrl as BASE_URL } from "../../config";
 const LABEL = "text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block";
 const INPUT = "w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 focus:border-zinc-400 text-slate-700";
 
-// ── HTTP / MQTT connection fields, shared by Add Device + Edit Connection ──
-function ProtocolFields({ protocol, onProtocol, ip, onIp, mqtt, onMqtt }) {
-  return (
-    <div className="flex flex-col gap-4">
-      <div>
-        <label className={LABEL}>Communication Protocol</label>
-        <div className="flex gap-2">
-          {["http", "mqtt"].map((p) => (
-            <button key={p} type="button" onClick={() => onProtocol(p)}
-              className={`flex-1 px-3 py-2 rounded-lg text-sm font-semibold border transition-colors ${
-                protocol === p ? "bg-indigo-600 border-indigo-600 text-white" : "border-slate-200 text-slate-600 hover:bg-slate-50"
-              }`}>
-              {p.toUpperCase()}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {protocol === "mqtt" ? (
-        <>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className={LABEL} htmlFor="mqtt-host">Broker Host / IP</label>
-              <input id="mqtt-host" className={INPUT} value={mqtt.broker_host}
-                onChange={(e) => onMqtt({ ...mqtt, broker_host: e.target.value })} placeholder="192.168.1.10" />
-            </div>
-            <div>
-              <label className={LABEL} htmlFor="mqtt-port">Broker Port</label>
-              <input id="mqtt-port" type="number" className={INPUT} value={mqtt.broker_port}
-                onChange={(e) => onMqtt({ ...mqtt, broker_port: e.target.value })} placeholder="1883" />
-            </div>
-          </div>
-          <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer select-none">
-            <input type="checkbox" className="h-4 w-4 rounded border-slate-300 accent-indigo-600"
-              checked={mqtt.auth} onChange={(e) => onMqtt({ ...mqtt, auth: e.target.checked })} />
-            Broker requires authentication
-          </label>
-          {mqtt.auth && (
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className={LABEL} htmlFor="mqtt-user">Username</label>
-                <input id="mqtt-user" className={INPUT} value={mqtt.username}
-                  onChange={(e) => onMqtt({ ...mqtt, username: e.target.value })} />
-              </div>
-              <div>
-                <label className={LABEL} htmlFor="mqtt-pass">Password</label>
-                <input id="mqtt-pass" type="password" className={INPUT} value={mqtt.password}
-                  onChange={(e) => onMqtt({ ...mqtt, password: e.target.value })} />
-              </div>
-            </div>
-          )}
-        </>
-      ) : (
-        <div>
-          <label className={LABEL} htmlFor="dev-ip">IP Address</label>
-          <input id="dev-ip" className={INPUT} value={ip} onChange={(e) => onIp(e.target.value)} placeholder="192.168.1.xx" />
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ── tiny inline text field ────────────────────────────────────
 function InlineEdit({ value, onSave, onCancel }) {
   const [v, setV] = useState(value);
@@ -612,23 +550,16 @@ export default function DevicesZones() {
   const [expandedLines, setExpandedLines]   = useState(new Set());
   const [addWizardOpen, setAddWizardOpen]   = useState(false);
   const [wizardStep, setWizardStep]         = useState(1);
-  const [newDevice, setNewDevice]           = useState({
-    name: "", type: "Edge Node", ip: "", mac: "", zone_id: "",
-    protocol: "http",
-    mqtt_broker_host: "", mqtt_broker_port: 1883,
-    mqtt_auth: false, mqtt_username: "", mqtt_password: "",
-  });
+  const [newDevice, setNewDevice]           = useState({ name: "", type: "Edge Node", ip: "", mac: "", zone_id: "" });
 
   // Heartbeat / status fetch state
   const [deviceStatus, setDeviceStatus]         = useState(null);
   const [deviceStatusLoading, setDeviceStatusLoading] = useState(false);
   const [deviceStatusError, setDeviceStatusError]     = useState(null);
 
-  // Edit-connection modal state (IP for HTTP, broker config for MQTT)
+  // Edit-IP modal state
   const [editIpOpen, setEditIpOpen]   = useState(false);
   const [editIpValue, setEditIpValue] = useState("");
-  const [editProtocol, setEditProtocol] = useState("http");
-  const [editMqtt, setEditMqtt] = useState({ broker_host: "", broker_port: 1883, auth: false, username: "", password: "" });
   const [savingIp, setSavingIp]       = useState(false);
 
   useEffect(() => { load(); }, [load]);
@@ -672,31 +603,18 @@ export default function DevicesZones() {
       .finally(() => setDeviceStatusLoading(false));
   }, [selectedDevice?.id]);
 
-  const handleSaveConnection = async () => {
-    if (!selectedDevice) return;
-    if (editProtocol === "http" && !editIpValue.trim()) return;
-    if (editProtocol === "mqtt" && !editMqtt.broker_host.trim()) return;
+  const handleSaveIp = async () => {
+    if (!editIpValue.trim() || !selectedDevice) return;
     setSavingIp(true);
-    const updates = editProtocol === "http"
-      ? { address: editIpValue.trim(), metadata: { protocol: "http" } }
-      : {
-          metadata: {
-            protocol: "mqtt",
-            mqtt_broker_host: editMqtt.broker_host.trim(),
-            mqtt_broker_port: Number(editMqtt.broker_port) || 1883,
-            mqtt_username: editMqtt.auth ? editMqtt.username : null,
-            mqtt_password: editMqtt.auth ? editMqtt.password : null,
-          },
-        };
-    const res = await updateDevice(selectedDevice.id, updates);
+    const res = await updateDevice(selectedDevice.id, { address: editIpValue.trim() });
     setSavingIp(false);
     if (res.ok) {
-      showToast("Connection settings updated", "success");
+      showToast("IP address updated", "success");
       setEditIpOpen(false);
+      setSelectedDevice((d) => ({ ...d, address: editIpValue.trim(), ip: editIpValue.trim() }));
       await refreshDevices();
-      setSelectedDevice(res.data);
     } else {
-      showToast(res.error || "Failed to update connection settings", "error");
+      showToast(res.error || "Failed to update IP", "error");
     }
   };
 
@@ -711,20 +629,7 @@ export default function DevicesZones() {
     });
 
   const handleAddDevice = async () => {
-    const payload = {
-      name: newDevice.name, type: newDevice.type, zone_id: newDevice.zone_id,
-      metadata: newDevice.protocol === "mqtt"
-        ? {
-            protocol: "mqtt",
-            mqtt_broker_host: newDevice.mqtt_broker_host,
-            mqtt_broker_port: Number(newDevice.mqtt_broker_port) || 1883,
-            mqtt_username: newDevice.mqtt_auth ? newDevice.mqtt_username : null,
-            mqtt_password: newDevice.mqtt_auth ? newDevice.mqtt_password : null,
-          }
-        : { protocol: "http" },
-    };
-    if (newDevice.protocol === "http") payload.ip = newDevice.ip;
-    const res = await addDevice(payload, user?.username);
+    const res = await addDevice(newDevice, user?.username);
     if (res.ok) { showToast("Device added", "success"); setAddWizardOpen(false); setWizardStep(1); await refreshDevices(); }
     else showToast("Failed to add device", "error");
   };
@@ -868,34 +773,18 @@ export default function DevicesZones() {
               <div className="p-4 flex flex-col gap-4">
                 <StatusPill status={selectedDevice.status} />
 
-                {/* Connection (HTTP or MQTT) */}
+                {/* IP Address */}
                 <div>
-                  <p className={LABEL}>Connection — {(selectedDevice.protocol || "http").toUpperCase()}</p>
+                  <p className={LABEL}>IP Address</p>
                   <div className="flex items-center gap-2">
                     <span className="font-mono text-sm text-slate-700 flex-1">
-                      {selectedDevice.protocol === "mqtt"
-                        ? (selectedDevice.mqtt_broker_host
-                            ? `${selectedDevice.mqtt_broker_host}:${selectedDevice.mqtt_broker_port || 1883}`
-                            : <span className="text-slate-400 italic">Not set</span>)
-                        : (selectedDevice.address || selectedDevice.ip || <span className="text-slate-400 italic">Not set</span>)}
+                      {selectedDevice.address || selectedDevice.ip || <span className="text-slate-400 italic">Not set</span>}
                     </span>
                     {canEdit && (
                       <button type="button"
-                        onClick={() => {
-                          const proto = selectedDevice.protocol === "mqtt" ? "mqtt" : "http";
-                          setEditProtocol(proto);
-                          setEditIpValue(selectedDevice.address || selectedDevice.ip || "");
-                          setEditMqtt({
-                            broker_host: selectedDevice.mqtt_broker_host || "",
-                            broker_port: selectedDevice.mqtt_broker_port || 1883,
-                            auth: !!selectedDevice.mqtt_username,
-                            username: selectedDevice.mqtt_username || "",
-                            password: selectedDevice.mqtt_password || "",
-                          });
-                          setEditIpOpen(true);
-                        }}
+                        onClick={() => { setEditIpValue(selectedDevice.address || selectedDevice.ip || ""); setEditIpOpen(true); }}
                         className="p-1 rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
-                        title="Edit connection settings">
+                        title="Edit IP address">
                         <Edit2 size={13} />
                       </button>
                     )}
@@ -1003,30 +892,36 @@ export default function DevicesZones() {
         </div>
       )}
 
-      {/* Edit Connection Modal */}
+      {/* Edit IP Modal */}
       {editIpOpen && selectedDevice && (
         <div className="fixed inset-0 z-[999] flex items-center justify-center">
           <div className="absolute inset-0 bg-black/40" onClick={() => setEditIpOpen(false)} />
           <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-sm mx-4 p-6 z-10 flex flex-col gap-4">
             <div className="flex items-center justify-between">
-              <h3 className="font-bold text-slate-900 text-sm">Edit Connection Settings</h3>
+              <h3 className="font-bold text-slate-900 text-sm">Edit Device Details</h3>
               <button type="button" onClick={() => setEditIpOpen(false)} className="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
             </div>
             <div>
               <p className="text-xs text-slate-500 mb-1">Device: <span className="font-medium text-slate-700">{selectedDevice.name}</span></p>
             </div>
-            <ProtocolFields
-              protocol={editProtocol} onProtocol={setEditProtocol}
-              ip={editIpValue} onIp={setEditIpValue}
-              mqtt={editMqtt} onMqtt={setEditMqtt}
-            />
+            <div>
+              <label className={LABEL} htmlFor="edit-ip">IP Address</label>
+              <input
+                id="edit-ip"
+                className={INPUT}
+                value={editIpValue}
+                onChange={(e) => setEditIpValue(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleSaveIp()}
+                placeholder="e.g. 192.168.1.100"
+                autoFocus
+              />
+            </div>
             <div className="flex justify-end gap-2 pt-1 border-t border-slate-100">
               <button type="button" onClick={() => setEditIpOpen(false)}
                 className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm text-slate-600 hover:bg-slate-50">
                 Cancel
               </button>
-              <button type="button" onClick={handleSaveConnection}
-                disabled={savingIp || (editProtocol === "http" ? !editIpValue.trim() : !editMqtt.broker_host.trim())}
+              <button type="button" onClick={handleSaveIp} disabled={savingIp || !editIpValue.trim()}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50">
                 {savingIp ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Save
               </button>
@@ -1053,13 +948,8 @@ export default function DevicesZones() {
                     {DEVICE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
                   </select>
                 </div>
+                <div><label className={LABEL} htmlFor="dev-ip">IP Address</label><input id="dev-ip" className={INPUT} value={newDevice.ip} onChange={(e) => setNewDevice((d) => ({ ...d, ip: e.target.value }))} placeholder="192.168.1.xx" /></div>
                 {/* <div><label className={LABEL} htmlFor="dev-mac">MAC Address</label><input id="dev-mac" className={INPUT} value={newDevice.mac} onChange={(e) => setNewDevice((d) => ({ ...d, mac: e.target.value }))} placeholder="AA:BB:CC:DD:EE:FF" /></div> */}
-                <ProtocolFields
-                  protocol={newDevice.protocol} onProtocol={(p) => setNewDevice((d) => ({ ...d, protocol: p }))}
-                  ip={newDevice.ip} onIp={(v) => setNewDevice((d) => ({ ...d, ip: v }))}
-                  mqtt={{ broker_host: newDevice.mqtt_broker_host, broker_port: newDevice.mqtt_broker_port, auth: newDevice.mqtt_auth, username: newDevice.mqtt_username, password: newDevice.mqtt_password }}
-                  onMqtt={(m) => setNewDevice((d) => ({ ...d, mqtt_broker_host: m.broker_host, mqtt_broker_port: m.broker_port, mqtt_auth: m.auth, mqtt_username: m.username, mqtt_password: m.password }))}
-                />
               </div>
             )}
             {wizardStep === 2 && (
@@ -1079,10 +969,7 @@ export default function DevicesZones() {
                 <div className="bg-slate-50 rounded-lg p-4 text-sm space-y-1">
                   <div className="flex justify-between"><span className="text-slate-500">Name:</span><span className="font-medium">{newDevice.name}</span></div>
                   <div className="flex justify-between"><span className="text-slate-500">Type:</span><span className="font-medium">{newDevice.type}</span></div>
-                  <div className="flex justify-between"><span className="text-slate-500">Protocol:</span><span className="font-medium">{newDevice.protocol.toUpperCase()}</span></div>
-                  {newDevice.protocol === "mqtt"
-                    ? <div className="flex justify-between"><span className="text-slate-500">Broker:</span><span className="font-mono">{newDevice.mqtt_broker_host}:{newDevice.mqtt_broker_port}</span></div>
-                    : <div className="flex justify-between"><span className="text-slate-500">IP:</span><span className="font-mono">{newDevice.ip}</span></div>}
+                  <div className="flex justify-between"><span className="text-slate-500">IP:</span><span className="font-mono">{newDevice.ip}</span></div>
                   <div className="flex justify-between"><span className="text-slate-500">Zone:</span><span className="font-medium">{zones.find((z) => z.id === newDevice.zone_id)?.name ?? "—"}</span></div>
                 </div>
               </div>

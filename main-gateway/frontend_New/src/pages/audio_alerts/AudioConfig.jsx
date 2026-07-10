@@ -15,7 +15,7 @@ import { formatFileSize, formatDate } from "./utils/formatters";
 import AudioPreviewButton from "./components/AudioPreviewButton";
 
 //const TABS_FULL = ["Voice Library", "TTS Templates", "Zones & Languages", "Volume & Audio Types"];
-const TABS = ["Voice Library", "Zones & Languages", "Volume & Audio"];
+const TABS = ["Voice Library", "Zones & Languages"] // "Volume & Audio"];
 const INPUT = "w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 focus:border-zinc-400 text-slate-700";
 const LABEL = "text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block";
 

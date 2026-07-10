@@ -3,39 +3,24 @@ import { Volume2, Cpu, Clock } from "lucide-react";
 import { getAudioAlertConfig } from "./api/alerts.api";
 import { useAlertsStore } from "../../store/useAlertsStore";
 
-import LiveMonitor from "./LiveMonitor";
-import ManualBroadcast from "./ManualBroadcast";
-import LivePaging from "./LivePaging";
-// import RuleBuilder from "./RuleBuilder"; // Rule Builder hidden from navigation for now
-import Schedule from "./Schedule";
-import Sop from "./Sop";
-import AudioConfig from "./AudioConfig";
-import AlertTypeSettings from "./AlertTypeSettings";
-import DevicesZones from "./DevicesZones";
-import Analytics from "./Analytics";
-import LogsAudit from "./LogsAudit";
-import AppSettings from "./AppSettings";
+import MonitorHub from "./MonitorHub";
+import SendAlertHub from "./SendAlertHub";
+import SetupHub from "./SetupHub";
 import { formatTimestamp } from "./utils/formatters";
 import { useCan } from "./hooks/useCan";
 import { AccessDenied } from "./components/EmptyState";
 
 // access tab removed — User Management is now a top-level gateway page
+// Monitor / Send Alert / Setup each combine several formerly-separate pages
+// behind an internal tab strip — see MonitorHub/SendAlertHub/SetupHub.jsx.
+// Permission gating happens inside each hub (per inner tab), not here.
 const SUB_TAB_MAP = {
-  live:      LiveMonitor,
-  broadcast: ManualBroadcast,
-  paging:    LivePaging,
-  // rules:     RuleBuilder, // Rule Builder hidden from navigation for now
-  schedule:  Schedule,
-  sop:       Sop,
-  audio:     AudioConfig,
-  alerttypes: AlertTypeSettings,
-  devices:   DevicesZones,
-  analytics: Analytics,
-  logs:      LogsAudit,
-  settings:  AppSettings,
+  monitor: MonitorHub,
+  send:    SendAlertHub,
+  setup:   SetupHub,
 };
 
-export default function AudioAlerts({ subTab = "live", user }) {
+export default function AudioAlerts({ subTab = "monitor", user }) {
   const { gatewaysUp, gatewaysTotal, lastSync, setSystemStatus } = useAlertsStore();
   const [configLoaded, setConfigLoaded] = useState(false);
   const canViewLive = useCan("aa.live.view");
@@ -47,25 +32,8 @@ export default function AudioAlerts({ subTab = "live", user }) {
     });
   }, [setSystemStatus]);
 
-  const PageComponent = SUB_TAB_MAP[subTab] ?? LiveMonitor;
-
-  // Gate full-page access by permission
-  const permMap = {
-    live:      "aa.live.view",
-    broadcast: "aa.broadcast.manual",
-    paging:    "aa.paging.use",
-    // rules:     "aa.rules.view", // Rule Builder hidden from navigation for now
-    schedule:  "aa.schedule.view",
-    sop:       "aa.sop.view",
-    audio:     "aa.audio.upload",
-    alerttypes: "aa.alerttypes.view",
-    devices:   "aa.devices.view",
-    analytics: "aa.analytics.view",
-    logs:      "aa.logs.view",
-    settings:  "aa.users.manage",
-  };
-  const requiredPerm = permMap[subTab];
-  const canAccess = !requiredPerm || useCan(requiredPerm);
+  const PageComponent = SUB_TAB_MAP[subTab] ?? MonitorHub;
+  const canAccess = true; // each hub gates its own inner tabs by permission
 
   return (
     <div className="p-6 flex flex-col gap-4 min-h-full">

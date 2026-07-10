@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { Plus, Pencil, Trash2, Loader2, ShieldAlert, Repeat, Lock } from "lucide-react";
+import { Plus, Pencil, Trash2, Loader2, ShieldAlert, Repeat, Lock, Info, AlertTriangle } from "lucide-react";
 import { getAlertTypes, createAlertType, updateAlertType, deleteAlertType } from "./api/audio.api";
 import { useCan } from "./hooks/useCan";
 import { useToast } from "../../components/ToastContext";
@@ -11,7 +11,7 @@ const INPUT = "w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-wh
 const LABEL = "text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block";
 
 const BLANK_FORM = {
-  label: "", is_blocking: false, requires_ack: false, unlimited: false,
+  label: "", category: "alert", is_blocking: false, requires_ack: false, unlimited: false,
   initial_play_count: 1, repeat_interval_sec: 60, reduction_step_sec: 0,
   min_interval_sec: 10, sort_order: 100,
 };
@@ -42,7 +42,7 @@ export default function AlertTypeSettings() {
   const openEdit = (t) => {
     setEditing(t.id);
     setForm({
-      label: t.label, is_blocking: t.is_blocking, requires_ack: t.requires_ack,
+      label: t.label, category: t.category || "alert", is_blocking: t.is_blocking, requires_ack: t.requires_ack,
       unlimited: t.initial_play_count === null,
       initial_play_count: t.initial_play_count ?? 1,
       repeat_interval_sec: t.repeat_interval_sec, reduction_step_sec: t.reduction_step_sec,
@@ -58,6 +58,7 @@ export default function AlertTypeSettings() {
     if (!form.label.trim()) { showToast("Name is required", "error"); return; }
     const payload = {
       label: form.label.trim(),
+      category: form.category,
       is_blocking: form.is_blocking,
       requires_ack: form.requires_ack,
       initial_play_count: form.unlimited ? null : Math.max(1, +form.initial_play_count || 1),
@@ -88,8 +89,9 @@ export default function AlertTypeSettings() {
         <div>
           <h2 className="text-sm font-semibold text-slate-800">Alert Type Settings</h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Configure how each alert type plays back — repeat count, replay interval, and whether it requires acknowledgement.
-            Manual Broadcast, SOP, and Scheduled alerts pick one of these types when sent.
+            Configure how each type plays back — repeat count, replay interval, and whether it requires acknowledgement.
+            Each type is either an <b>Alert</b> (urgent, needs attention) or <b>Information</b> (routine, non-urgent) —
+            Manual Broadcast, SOP, and Scheduled alerts pick one of these when sent.
           </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -112,7 +114,7 @@ export default function AlertTypeSettings() {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-slate-100">
-                {["Type", "Behavior", "Plays", "Repeat Interval", "Order", ""].map((h) => (
+                {["Type", "Category", "Behavior", "Plays", "Repeat Interval", "Order", ""].map((h) => (
                   <th key={h} className="px-4 py-3 text-left font-semibold text-slate-600 text-[11px] uppercase tracking-wide whitespace-nowrap">{h}</th>
                 ))}
               </tr>
@@ -129,6 +131,17 @@ export default function AlertTypeSettings() {
                         </span>
                       )}
                     </div>
+                  </td>
+                  <td className="px-4 py-3">
+                    {t.category === "information" ? (
+                      <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-sky-700 bg-sky-100 px-2 py-0.5 rounded-full">
+                        <Info size={10} /> Information
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-orange-700 bg-orange-100 px-2 py-0.5 rounded-full">
+                        <AlertTriangle size={10} /> Alert
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex flex-wrap gap-1.5">
@@ -186,6 +199,24 @@ export default function AlertTypeSettings() {
               <input id="at-label" className={INPUT} value={form.label}
                 onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))}
                 placeholder="e.g. Fire Emergency" />
+            </div>
+
+            <div>
+              <label className={LABEL}>Category</label>
+              <div className="flex gap-2">
+                {[
+                  { value: "alert", label: "Alert", desc: "Urgent — needs the operator's attention", Icon: AlertTriangle },
+                  { value: "information", label: "Information", desc: "Routine — non-urgent announcement", Icon: Info },
+                ].map(({ value, label, desc, Icon }) => (
+                  <button key={value} type="button" onClick={() => setForm((f) => ({ ...f, category: value }))}
+                    className={`flex-1 flex flex-col items-start gap-1 p-3 rounded-lg border text-left transition-colors ${
+                      form.category === value ? "border-indigo-400 bg-indigo-50" : "border-slate-200 hover:bg-slate-50"
+                    }`}>
+                    <span className="flex items-center gap-1.5 text-sm font-semibold text-slate-800"><Icon size={13} />{label}</span>
+                    <span className="text-[11px] text-slate-400">{desc}</span>
+                  </button>
+                ))}
+              </div>
             </div>
 
             <label className="flex items-start gap-2.5 p-3 rounded-lg border border-slate-200 cursor-pointer hover:bg-slate-50">

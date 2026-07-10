@@ -17,7 +17,7 @@ const STATIC_RP_AS_ARRAYS = Object.fromEntries(
 // import {BrowserRouter as Router, Route, Routes, BrowserRouter} from "react-router-dom";
 
 export default function App() {
-  const [activePanel, setActivePanel] = useState("aa-live");
+  const [activePanel, setActivePanel] = useState("aa-monitor");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
   const setUser = useAuthStore((state) => state.setUser);

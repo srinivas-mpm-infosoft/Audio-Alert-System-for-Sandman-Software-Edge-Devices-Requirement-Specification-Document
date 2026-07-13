@@ -1,11 +1,12 @@
 import { useState, useEffect } from "react";
 import {
-  Sliders, Lock, LogOut, Cpu,
+  Sliders, Lock, Cpu, Wifi, Settings,
   ChevronDown, Volume2, Activity,
   Users, Megaphone,
 } from "lucide-react";
 import { useAuthStore } from "../store/useAuthStore";
 import { EXISTING_ROLE_MAP } from "../pages/audio_alerts/utils/constants";
+import UserMenu from "./UserMenu";
 
 // Normalize legacy 3-role names to the 7-role system
 function normalizeRole(role) {
@@ -13,11 +14,17 @@ function normalizeRole(role) {
 }
 
 const NAV_ITEMS = [
-  { id: "audio-alerts-group", icon: Volume2,    label: "Audio Alerts",    isAAGroup: true },
-  { id: "user-management",    icon: Users,      label: "User Management", domId: "nav-user-mgmt",      requiresSuper: true },
-  { id: "change-password",    icon: Lock,       label: "Change Password" },
-  { id: "logout",             icon: LogOut,     label: "Logout" },
+  { id: "audio-alerts-group",  icon: Volume2,  label: "Audio Alerts",    isAAGroup: true },
+  { id: "administration-group", icon: Settings, label: "Administration", isAdminGroup: true },
 ];
+
+const ADMIN_SUB_ITEMS = [
+  { id: "Wifi/4G",         icon: Wifi,  label: "WiFi / 4G / Ethernet" },
+  { id: "user-management", icon: Users, label: "User Management", domId: "nav-user-mgmt", requiresSuper: true },
+  { id: "change-password", icon: Lock,  label: "Change Password" },
+];
+
+const ADMIN_PANEL_IDS = new Set(ADMIN_SUB_ITEMS.map((i) => i.id));
 
 // aa-access removed — User Management is now a top-level nav item
 // Each item combines several formerly-separate pages behind its own internal
@@ -36,9 +43,11 @@ export default function Sidebar({ active, onSelect, role }) {
   const rolePermissions = useAuthStore((s) => s.rolePermissions);
 
   const [aaOpen, setAaOpen] = useState(() => AA_PANEL_IDS.has(active));
+  const [adminOpen, setAdminOpen] = useState(() => ADMIN_PANEL_IDS.has(active));
 
   useEffect(() => {
     if (AA_PANEL_IDS.has(active)) setAaOpen(true);
+    if (ADMIN_PANEL_IDS.has(active)) setAdminOpen(true);
   }, [active]);
 
   const isAdmin = ["administrator", "plant_manager"].includes(nr);
@@ -50,7 +59,10 @@ export default function Sidebar({ active, onSelect, role }) {
     return true;
   });
 
+  const allowedAdminSubs = ADMIN_SUB_ITEMS.filter((sub) => !sub.requiresSuper || isSuper);
+
   const isAAActive = AA_PANEL_IDS.has(active);
+  const isAdminGroupActive = ADMIN_PANEL_IDS.has(active);
 
   // Use dynamic permissions from backend (rolePermissions) to filter sidebar tabs
   const rbacRole = EXISTING_ROLE_MAP[role] ?? role ?? "operator";
@@ -78,7 +90,7 @@ export default function Sidebar({ active, onSelect, role }) {
           <Cpu size={12} style={{ color: "#60a5fa" }} />
         </div>
         <span className="text-sm font-semibold tracking-wide" style={{ color: "#e2e8f0" }}>
-          Gateway
+          Audio Alert & Information System
         </span>
       </div>
 
@@ -136,6 +148,56 @@ export default function Sidebar({ active, onSelect, role }) {
             );
           }
 
+          /* ── Administration expandable group ── */
+          if (item.isAdminGroup) {
+            return (
+              <li key={item.id}>
+                <button
+                  onClick={() => setAdminOpen((o) => !o)}
+                  className="w-full flex items-center justify-between px-3 py-2 rounded-md text-sm font-semibold transition-colors duration-100"
+                  style={isAdminGroupActive ? { background: "#1e3a5f22", color: "#93c5fd", borderLeft: "2px solid #3b82f6" } : { color: "#e2e8f0" }}
+                  onMouseEnter={(e) => { if (!isAdminGroupActive) e.currentTarget.style.color = "#f8fafc"; }}
+                  onMouseLeave={(e) => { if (!isAdminGroupActive) e.currentTarget.style.color = "#e2e8f0"; }}
+                  aria-expanded={adminOpen}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <Settings size={15} style={{ color: isAdminGroupActive ? "#60a5fa" : "#94a3b8" }} aria-hidden="true" />
+                    <span className="font-semibold">{item.label}</span>
+                  </div>
+                  <ChevronDown
+                    size={13}
+                    style={{ color: "#94a3b8", transform: adminOpen ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 0.2s" }}
+                    aria-hidden="true"
+                  />
+                </button>
+
+                <div style={{ maxHeight: adminOpen ? `${allowedAdminSubs.length * 38}px` : "0px", overflow: "hidden", transition: "max-height 0.2s ease" }}>
+                  <div className="mt-0.5 ml-3 pl-3 space-y-0.5" style={{ borderLeft: "1px solid #1f2937" }}>
+                    {allowedAdminSubs.map((sub) => {
+                      const SubIcon  = sub.icon;
+                      const isActive = active === sub.id;
+                      return (
+                        <button
+                          key={sub.id}
+                          id={sub.domId}
+                          onClick={() => onSelect(sub.id)}
+                          className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded text-[12.5px] font-semibold transition-colors duration-100"
+                          style={isActive ? { background: "#1e3a5f33", color: "#93c5fd" } : { color: "#cbd5e1" }}
+                          onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.color = "#f1f5f9"; }}
+                          onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.color = "#cbd5e1"; }}
+                        >
+                          <SubIcon size={12} style={{ color: isActive ? "#60a5fa" : "#94a3b8" }} aria-hidden="true" />
+                          {sub.label}
+                          {isActive && <span className="ml-auto rounded-full shrink-0" style={{ width: 5, height: 5, background: "#3b82f6" }} aria-hidden="true" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </li>
+            );
+          }
+
           /* ── Regular item ── */
           const isActive = active === item.id;
           return (
@@ -157,10 +219,8 @@ export default function Sidebar({ active, onSelect, role }) {
       </ul>
 
       {/* Footer */}
-      <div className="px-4 py-3 border-t border-white/5 text-center">
-        <p className="text-[10px] uppercase tracking-widest" style={{ color: "#374151" }}>
-          Gateway v2.0
-        </p>
+      <div className="px-3 py-3 border-t border-white/5">
+        <UserMenu variant="sidebar" />
       </div>
     </nav>
   );

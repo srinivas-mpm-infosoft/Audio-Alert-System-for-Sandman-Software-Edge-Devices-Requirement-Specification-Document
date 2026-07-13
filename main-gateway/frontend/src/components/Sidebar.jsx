@@ -105,7 +105,7 @@ export default function Sidebar({ active, onSelect, role }) {
           <Cpu size={12} style={{ color: "#60a5fa" }} />
         </div>
         <span className="text-sm font-semibold tracking-wide" style={{ color: "#e2e8f0" }}>
-          Gateway
+          Audio Alert & Information System
         </span>
       </div>
 
@@ -241,12 +241,7 @@ export default function Sidebar({ active, onSelect, role }) {
         })}
       </ul>
 
-      {/* Footer */}
-      <div className="px-4 py-3 border-t border-white/5 text-center">
-        <p className="text-[10px] uppercase tracking-widest" style={{ color: "#374151" }}>
-          Gateway v2.0
-        </p>
-      </div>
+
     </nav>
   );
 }

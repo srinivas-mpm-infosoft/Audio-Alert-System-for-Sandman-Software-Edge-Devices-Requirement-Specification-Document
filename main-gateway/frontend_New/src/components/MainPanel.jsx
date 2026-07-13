@@ -1,7 +1,12 @@
 import ChangePassword from "./../pages/ChangePassword";
+import Wifi4G from "./../pages/Wifi4G";
 import UserManagement from "./../pages/UserManagement";
 import AudioAlerts from "./../pages/audio_alerts/index";
-import { targetUrl } from "./../config";
+
+// Normalize legacy 3-role → 7-role for permission checks
+function normalizeRole(role) {
+  return { superadmin: "administrator", admin: "plant_manager", user: "operator" }[role] ?? role;
+}
 
 // aa-access removed — User Management is the top-level nav item now
 const AA_SUB_TAB_MAP = {
@@ -11,23 +16,13 @@ const AA_SUB_TAB_MAP = {
 };
 
 const KNOWN_PANELS = new Set([
-  "change-password", "user-management", "logout",
+  "Wifi/4G", "change-password", "user-management",
 ]);
 
 export default function MainPanel({ panel, user }) {
-  const logout = async () => {
-    try {
-      await fetch(`${targetUrl}/logout`, { method: "POST", credentials: "include" });
-    } catch (err) {
-      console.error(err);
-    }
-    window.location.href = "/";
-  };
-
-  if (panel === "logout") {
-    logout();
-    return <main id="main-panel"><div>Logging out…</div></main>;
-  }
+  const role = normalizeRole(user?.role);
+  const isAdmin = ["administrator", "plant_manager"].includes(role);
+  const isReadOnly = !isAdmin;
 
   const aaSubTab = AA_SUB_TAB_MAP[panel] ?? null;
   const isKnown  = aaSubTab !== null || KNOWN_PANELS.has(panel);
@@ -39,6 +34,8 @@ export default function MainPanel({ panel, user }) {
         <AudioAlerts subTab={aaSubTab} user={user} />
       )}
 
+      {panel === "Wifi/4G"    && <Wifi4G isReadOnly={isReadOnly} />}
+      
       {panel === "change-password" && <ChangePassword />}
 
       {/* ── User Management (replaces Add User) ── */}
